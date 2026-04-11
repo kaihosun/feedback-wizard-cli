@@ -7,6 +7,17 @@ import { BackupManager } from "../installer/rollback.js"
 import { runInstaller } from "../installer/index.js"
 import { fileExists } from "../utils/fs.js"
 import { logger } from "../utils/logger.js"
+import { detectRunEnvironment, type RunEnvironment } from "../utils/detect-environment.js"
+import { printStartBanner, printSuccessBanner, printErrorBanner } from "../utils/banner.js"
+import { createRequire } from "module"
+import { fileURLToPath } from "url"
+import { dirname, join } from "path"
+
+// Lee la versión del package.json del CLI
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
+const _require = createRequire(import.meta.url)
+const cliPkg = _require(join(__dirname, "../../package.json")) as { version: string }
 
 // ---------------------------------------------------------------------------
 // init command
@@ -17,6 +28,9 @@ export async function initCommand(options: {
   dryRun?: boolean
 }): Promise<void> {
   const projectRoot = process.cwd()
+
+  // ── Banner de inicio ───────────────────────────────────────────────────────
+  printStartBanner(cliPkg.version)
 
   // ── PASO 0: Validación de entorno ─────────────────────────────────────────
   logger.section("Environment validation")
@@ -51,18 +65,9 @@ export async function initCommand(options: {
 
   logger.success("Next.js project detected.")
 
-  // Verify ANTHROPIC_API_KEY
-  if (!process.env.ANTHROPIC_API_KEY) {
-    logger.error(
-      "ANTHROPIC_API_KEY is not set.\n" +
-        "  The analyzer uses Claude to detect your project's stack.\n" +
-        "  Get your key at https://console.anthropic.com and set it:\n" +
-        "    export ANTHROPIC_API_KEY=sk-ant-...",
-    )
-    process.exit(1)
-  }
-
-  logger.success("ANTHROPIC_API_KEY found.")
+  // Detect run environment and print the appropriate banner
+  const runEnv = detectRunEnvironment()
+  printEnvironmentBanner(runEnv)
 
   // Warn if there are uncommitted git changes (non-blocking)
   try {
@@ -83,8 +88,8 @@ export async function initCommand(options: {
   // Create BackupManager early so it is available for rollback
   const backup = new BackupManager(projectRoot)
 
-  // ── PASO 1: Análisis AI del proyecto ──────────────────────────────────────
-  logger.section("AI project analysis")
+  // ── PASO 1: Análisis del proyecto ─────────────────────────────────────────
+  logger.section("Project analysis")
 
   let analysis
   try {
@@ -172,30 +177,38 @@ export async function initCommand(options: {
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    logger.error(
-      `Installation failed: ${message}\n` +
-        "  All changes have been rolled back.\n" +
-        "  Check the error above and try again.\n" +
-        "  If the issue persists, open an issue: https://github.com/feedback-wizard/cli/issues",
-    )
+    printErrorBanner(message)
     process.exit(1)
   }
 
-  // ── Success ───────────────────────────────────────────────────────────────
+  // ── Banner de éxito ───────────────────────────────────────────────────────
   if (!options.dryRun) {
-    process.stdout.write(
-      "\n" +
-        "  feedback-wizard installed successfully!\n" +
-        "\n" +
-        "  Next steps:\n" +
-        "    1. Run your dev server: npm run dev\n" +
-        "    2. Look for the floating bug icon in the bottom-right corner\n" +
-        "    3. Click it to report your first issue!\n" +
-        "\n" +
-        "  Config saved to .wizard-config.json\n" +
-        "  Need help? https://github.com/feedback-wizard/cli\n" +
-        "\n",
-    )
+    printSuccessBanner()
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Environment banner
+// ---------------------------------------------------------------------------
+
+function printEnvironmentBanner(env: RunEnvironment): void {
+  switch (env) {
+    case "claude-code":
+      process.stdout.write(
+        "  Running inside Claude Code — no API key required\n"
+      )
+      break
+    case "standalone-with-key":
+      process.stdout.write(
+        "  Using Claude API (claude-sonnet-4-5) for analysis\n"
+      )
+      break
+    case "standalone-no-key":
+      process.stdout.write(
+        "  Running in static mode — will ask about ambiguous detections\n" +
+          "  Tip: set ANTHROPIC_API_KEY for fully automatic analysis\n"
+      )
+      break
   }
 }
 

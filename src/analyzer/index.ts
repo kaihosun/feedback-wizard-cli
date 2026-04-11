@@ -1,6 +1,6 @@
 import path from "path"
 import Anthropic from "@anthropic-ai/sdk"
-import { buildProjectSnapshot, readFilesForAnalysis } from "./file-reader.js"
+import { buildProjectSnapshot, readFilesForAnalysis, type ProjectSnapshot } from "./file-reader.js"
 import * as Prompts from "./prompts.js"
 import type {
   ProjectAnalysis,
@@ -16,6 +16,8 @@ import type {
 import { resolveWithFallback } from "../utils/confidence.js"
 import { logger } from "../utils/logger.js"
 import { fileExists } from "../utils/fs.js"
+import { detectRunEnvironment } from "../utils/detect-environment.js"
+import { runStaticAnalysis } from "./static-analyzer.js"
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -388,7 +390,6 @@ async function detectLayout(
     const content = await snapshot.readFile(candidate)
     if (content === null) continue
 
-    // Analyse the content to determine how to inject the provider
     const hasProviders =
       /Provider|providers|ProviderTree/i.test(content)
 
@@ -435,166 +436,24 @@ async function detectLayout(
 }
 
 // ---------------------------------------------------------------------------
-// Main entry point
+// Shared: resolve choices used by both analyzeWithClaude and analyzeWithStaticFallback
 // ---------------------------------------------------------------------------
 
-export async function analyzeProject(projectRoot: string): Promise<ProjectAnalysis> {
-  logger.section("Analyzing project")
-
-  // Step 1 — build file index
-  logger.step(1, 3, "Reading project files...")
-
-  const snapshot = await buildProjectSnapshot(projectRoot)
-
-  // Determine structural metadata from the file list and directory structure
-  const hasSrcDir = snapshot.dirStructure.some((d) => d === "src" || d.startsWith("src/"))
-
-  const routerType: RouterType = snapshot.filePaths.some(
-    (f) => f.startsWith("src/app/") || f.startsWith("app/")
-  )
-    ? "app"
-    : "pages"
-
-  // Package manager detection
-  const [hasPnpmLock, hasYarnLock, hasBunLock, hasPackageLock] = await Promise.all([
-    fileExists(path.join(projectRoot, "pnpm-lock.yaml")),
-    fileExists(path.join(projectRoot, "yarn.lock")),
-    fileExists(path.join(projectRoot, "bun.lockb")),
-    fileExists(path.join(projectRoot, "package-lock.json")),
-  ])
-
-  const packageManager: ProjectAnalysis["packageManager"] = hasPnpmLock
-    ? "pnpm"
-    : hasYarnLock
-      ? "yarn"
-      : hasBunLock
-        ? "bun"
-        : "npm"
-
-  // Monorepo detection
-  const [hasPnpmWorkspace, hasTurbo, hasNx, hasLerna] = await Promise.all([
-    fileExists(path.join(projectRoot, "pnpm-workspace.yaml")),
-    fileExists(path.join(projectRoot, "turbo.json")),
-    fileExists(path.join(projectRoot, "nx.json")),
-    fileExists(path.join(projectRoot, "lerna.json")),
-  ])
-
-  const isMonorepo = hasPnpmWorkspace || hasTurbo || hasNx || hasLerna
-
-  // Project name from package.json
-  const projectName =
-    typeof snapshot.packageJson.name === "string"
-      ? snapshot.packageJson.name.replace(/^@[^/]+\//, "")
-      : path.basename(projectRoot)
-
-  // tsconfig paths
-  const tsconfig = await snapshot.readFile("tsconfig.json")
-  let tsConfigPaths: Record<string, string[]> = {}
-  if (tsconfig) {
-    try {
-      const parsed = JSON.parse(tsconfig) as {
-        compilerOptions?: { paths?: Record<string, string[]> }
-      }
-      tsConfigPaths = parsed.compilerOptions?.paths ?? {}
-    } catch {
-      // ignore parse errors
-    }
-  }
-
-  // Step 2 — read targeted files for each dimension (all in parallel)
-  logger.step(2, 3, "Running AI analysis (6 dimensions in parallel)...")
-
-  const [authFiles, ormFiles, storageFiles, uiFiles, rolesFiles] = await Promise.all([
-    readFilesForAnalysis(snapshot, [
-      "package.json",
-      "middleware.ts",
-      "src/middleware.ts",
-      "src/lib/auth.ts",
-      "src/lib/supabase/server.ts",
-      "auth.config.ts",
-      "src/app/api/auth/[...nextauth]/route.ts",
-    ]),
-    readFilesForAnalysis(snapshot, [
-      "package.json",
-      "prisma/schema.prisma",
-      "drizzle.config.ts",
-      "src/db/schema.ts",
-      "src/lib/db.ts",
-      "src/lib/prisma.ts",
-    ]),
-    readFilesForAnalysis(snapshot, [
-      "package.json",
-      "src/lib/storage.ts",
-      "src/lib/s3.ts",
-      "src/lib/supabase/client.ts",
-      ".env.example",
-    ]),
-    readFilesForAnalysis(snapshot, [
-      "package.json",
-      "components.json",
-      "tailwind.config.ts",
-      "tailwind.config.js",
-      "src/components/ui/button.tsx",
-    ]),
-    readFilesForAnalysis(snapshot, [
-      "prisma/schema.prisma",
-      "src/types/index.ts",
-      "src/types/auth.ts",
-      "src/lib/auth.ts",
-      "middleware.ts",
-    ]),
-  ])
-
-  // Step 3 — call Claude for all 6 dimensions in parallel
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error(
-      "ANTHROPIC_API_KEY is not set.\n" +
-      "Get your API key at https://console.anthropic.com and set it as an environment variable:\n" +
-      "  export ANTHROPIC_API_KEY=sk-ant-..."
-    )
-  }
-
-  const client = new Anthropic() // reads ANTHROPIC_API_KEY from environment
-
-  const spinner = logger.spinner("Calling Claude API...")
-
-  const [authResult, ormResult, storageResult, uiResult, modulesResult, rolesResult] =
-    await Promise.allSettled([
-      callClaude(client, Prompts.buildAuthPrompt(authFiles, snapshot.packageJson)),
-      callClaude(client, Prompts.buildORMPrompt(ormFiles, snapshot.packageJson)),
-      callClaude(
-        client,
-        Prompts.buildStoragePrompt(storageFiles, snapshot.packageJson, snapshot.envVars)
-      ),
-      callClaude(client, Prompts.buildUIPrompt(uiFiles, snapshot.packageJson)),
-      callClaude(
-        client,
-        Prompts.buildModulesPrompt(snapshot.routePaths, snapshot.dirStructure)
-      ),
-      callClaude(client, Prompts.buildRolesPrompt(rolesFiles, snapshot.packageJson)),
-    ])
-
-  spinner.succeed("Analysis complete")
-
-  // Step 3 — resolve each dimension
-  logger.step(3, 3, "Resolving ambiguous detections...")
-
-  // Helper to extract JSON string from allSettled results
-  function getJson(result: PromiseSettledResult<string>, label: string): string | null {
-    if (result.status === "fulfilled") return result.value
-    logger.warn(`${label} analysis failed: ${String(result.reason)}`)
-    return null
-  }
-
-  const authParsed = parseAuth(getJson(authResult, "Auth"))
-  const ormParsed = parseORM(getJson(ormResult, "ORM"))
-  const storageParsed = parseStorage(getJson(storageResult, "Storage"))
-  const uiParsed = parseUI(getJson(uiResult, "UI"))
-  const rolesParsed = parseRoles(getJson(rolesResult, "Roles"))
-  const modulesJson = getJson(modulesResult, "Modules")
-  const modules = parseModules(modulesJson, snapshot.routePaths)
-
-  // Resolve each dimension using resolveWithFallback
+async function resolveAllDimensions(
+  authParsed: { data: DetectedAuth; confidence: number; evidence: string[] },
+  ormParsed: { data: DetectedORM; confidence: number; evidence: string[] },
+  storageParsed: { data: DetectedStorage; confidence: number; evidence: string[] },
+  uiParsed: { data: DetectedUI; confidence: number; evidence: string[] },
+  rolesParsed: { data: DetectedRoles; confidence: number; evidence: string[] },
+  modules: DetectedModule[]
+): Promise<{
+  auth: DetectedAuth
+  orm: DetectedORM
+  storage: DetectedStorage
+  ui: DetectedUI
+  modules: DetectedModule[]
+  roles: DetectedRoles
+}> {
   const auth = await resolveWithFallback<DetectedAuth>(
     { data: authParsed.data, confidence: authParsed.confidence, evidence: authParsed.evidence, category: "Auth" },
     "Auth provider",
@@ -708,24 +567,291 @@ export async function analyzeProject(projectRoot: string): Promise<ProjectAnalys
     }
   )
 
-  // Layout detection — heuristic, no AI
+  return { auth, orm, storage, ui, modules, roles }
+}
+
+// ---------------------------------------------------------------------------
+// Strategy: Claude API (standalone with key)
+// ---------------------------------------------------------------------------
+
+async function analyzeWithClaude(
+  projectRoot: string,
+  snapshot: ProjectSnapshot
+): Promise<ProjectAnalysis> {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    throw new Error(
+      "ANTHROPIC_API_KEY is not set.\n" +
+        "Get your key at https://console.anthropic.com\n" +
+        "Or run without a key — static analysis will be used with interactive prompts for ambiguous detections."
+    )
+  }
+
+  const hasSrcDir = snapshot.dirStructure.some((d) => d === "src" || d.startsWith("src/"))
+  const routerType: RouterType = snapshot.filePaths.some(
+    (f) => f.startsWith("src/app/") || f.startsWith("app/")
+  )
+    ? "app"
+    : "pages"
+
+  // Read targeted files for each dimension
+  logger.step(2, 3, "Running AI analysis (6 dimensions in parallel)...")
+
+  const [authFiles, ormFiles, storageFiles, uiFiles, rolesFiles] = await Promise.all([
+    readFilesForAnalysis(snapshot, [
+      "package.json",
+      "middleware.ts",
+      "src/middleware.ts",
+      "src/lib/auth.ts",
+      "src/lib/supabase/server.ts",
+      "auth.config.ts",
+      "src/app/api/auth/[...nextauth]/route.ts",
+    ]),
+    readFilesForAnalysis(snapshot, [
+      "package.json",
+      "prisma/schema.prisma",
+      "drizzle.config.ts",
+      "src/db/schema.ts",
+      "src/lib/db.ts",
+      "src/lib/prisma.ts",
+    ]),
+    readFilesForAnalysis(snapshot, [
+      "package.json",
+      "src/lib/storage.ts",
+      "src/lib/s3.ts",
+      "src/lib/supabase/client.ts",
+      ".env.example",
+    ]),
+    readFilesForAnalysis(snapshot, [
+      "package.json",
+      "components.json",
+      "tailwind.config.ts",
+      "tailwind.config.js",
+      "src/components/ui/button.tsx",
+    ]),
+    readFilesForAnalysis(snapshot, [
+      "prisma/schema.prisma",
+      "src/types/index.ts",
+      "src/types/auth.ts",
+      "src/lib/auth.ts",
+      "middleware.ts",
+    ]),
+  ])
+
+  const client = new Anthropic()
+
+  const spinner = logger.spinner("Calling Claude API...")
+
+  const [authResult, ormResult, storageResult, uiResult, modulesResult, rolesResult] =
+    await Promise.allSettled([
+      callClaude(client, Prompts.buildAuthPrompt(authFiles, snapshot.packageJson)),
+      callClaude(client, Prompts.buildORMPrompt(ormFiles, snapshot.packageJson)),
+      callClaude(
+        client,
+        Prompts.buildStoragePrompt(storageFiles, snapshot.packageJson, snapshot.envVars)
+      ),
+      callClaude(client, Prompts.buildUIPrompt(uiFiles, snapshot.packageJson)),
+      callClaude(
+        client,
+        Prompts.buildModulesPrompt(snapshot.routePaths, snapshot.dirStructure)
+      ),
+      callClaude(client, Prompts.buildRolesPrompt(rolesFiles, snapshot.packageJson)),
+    ])
+
+  spinner.succeed("Analysis complete")
+
+  logger.step(3, 3, "Resolving ambiguous detections...")
+
+  function getJson(result: PromiseSettledResult<string>, label: string): string | null {
+    if (result.status === "fulfilled") return result.value
+    logger.warn(`${label} analysis failed: ${String(result.reason)}`)
+    return null
+  }
+
+  const authParsed = parseAuth(getJson(authResult, "Auth"))
+  const ormParsed = parseORM(getJson(ormResult, "ORM"))
+  const storageParsed = parseStorage(getJson(storageResult, "Storage"))
+  const uiParsed = parseUI(getJson(uiResult, "UI"))
+  const rolesParsed = parseRoles(getJson(rolesResult, "Roles"))
+  const modulesJson = getJson(modulesResult, "Modules")
+  const modules = parseModules(modulesJson, snapshot.routePaths)
+
+  const resolved = await resolveAllDimensions(
+    authParsed,
+    ormParsed,
+    storageParsed,
+    uiParsed,
+    rolesParsed,
+    modules
+  )
+
   const layout = await detectLayout(snapshot, hasSrcDir, routerType)
+
+  return buildAnalysis(projectRoot, snapshot, hasSrcDir, routerType, resolved, layout)
+}
+
+// ---------------------------------------------------------------------------
+// Strategy: static analysis with interactive fallback (claude-code / no-key)
+// ---------------------------------------------------------------------------
+
+async function analyzeWithStaticFallback(
+  projectRoot: string,
+  snapshot: ProjectSnapshot
+): Promise<ProjectAnalysis> {
+  logger.step(2, 3, "Running static analysis...")
+
+  const staticResult = runStaticAnalysis(snapshot)
+
+  // Build parsed results — use null-safe defaults for undetected dimensions
+  const authParsed = staticResult.auth ?? {
+    data: { provider: "custom" as const, confidence: 0, evidence: [], getUserIdSnippet: "" },
+    confidence: 0,
+    evidence: [],
+  }
+
+  const ormParsed = staticResult.orm ?? {
+    data: { provider: "none" as const, confidence: 0 },
+    confidence: 0,
+    evidence: [],
+  }
+
+  const storageParsed = staticResult.storage ?? {
+    data: { provider: "local" as const, confidence: 0, uploadDir: "public/uploads" },
+    confidence: 0,
+    evidence: [],
+  }
+
+  const uiParsed = staticResult.ui ?? {
+    data: { provider: "tailwind-only" as const, confidence: 0 },
+    confidence: 0,
+    evidence: [],
+  }
+
+  logger.step(3, 3, "Resolving ambiguous detections...")
+
+  const resolved = await resolveAllDimensions(
+    authParsed,
+    ormParsed,
+    storageParsed,
+    uiParsed,
+    staticResult.roles,
+    staticResult.modules
+  )
+
+  const hasSrcDir = snapshot.dirStructure.some((d) => d === "src" || d.startsWith("src/"))
+  const routerType: RouterType = snapshot.filePaths.some(
+    (f) => f.startsWith("src/app/") || f.startsWith("app/")
+  )
+    ? "app"
+    : "pages"
+
+  const layout = await detectLayout(snapshot, hasSrcDir, routerType)
+
+  return buildAnalysis(projectRoot, snapshot, hasSrcDir, routerType, resolved, layout)
+}
+
+// ---------------------------------------------------------------------------
+// Helper: assemble final ProjectAnalysis from resolved dimensions + snapshot
+// ---------------------------------------------------------------------------
+
+async function buildAnalysis(
+  projectRoot: string,
+  snapshot: ProjectSnapshot,
+  hasSrcDir: boolean,
+  routerType: RouterType,
+  resolved: {
+    auth: DetectedAuth
+    orm: DetectedORM
+    storage: DetectedStorage
+    ui: DetectedUI
+    modules: DetectedModule[]
+    roles: DetectedRoles
+  },
+  layout: DetectedLayout
+): Promise<ProjectAnalysis> {
+  const [hasPnpmLock, hasYarnLock, hasBunLock] = await Promise.all([
+    fileExists(path.join(projectRoot, "pnpm-lock.yaml")),
+    fileExists(path.join(projectRoot, "yarn.lock")),
+    fileExists(path.join(projectRoot, "bun.lockb")),
+  ])
+
+  const packageManager: ProjectAnalysis["packageManager"] = hasPnpmLock
+    ? "pnpm"
+    : hasYarnLock
+      ? "yarn"
+      : hasBunLock
+        ? "bun"
+        : "npm"
+
+  const [hasPnpmWorkspace, hasTurbo, hasNx, hasLerna] = await Promise.all([
+    fileExists(path.join(projectRoot, "pnpm-workspace.yaml")),
+    fileExists(path.join(projectRoot, "turbo.json")),
+    fileExists(path.join(projectRoot, "nx.json")),
+    fileExists(path.join(projectRoot, "lerna.json")),
+  ])
+
+  const isMonorepo = hasPnpmWorkspace || hasTurbo || hasNx || hasLerna
+
+  const projectName =
+    typeof snapshot.packageJson.name === "string"
+      ? snapshot.packageJson.name.replace(/^@[^/]+\//, "")
+      : path.basename(projectRoot)
+
+  const tsconfig = await snapshot.readFile("tsconfig.json")
+  let tsConfigPaths: Record<string, string[]> = {}
+  if (tsconfig) {
+    try {
+      const parsed = JSON.parse(tsconfig) as {
+        compilerOptions?: { paths?: Record<string, string[]> }
+      }
+      tsConfigPaths = parsed.compilerOptions?.paths ?? {}
+    } catch {
+      // ignore parse errors
+    }
+  }
 
   return {
     projectRoot,
     routerType,
     hasSrcDir,
-    auth,
-    orm,
-    storage,
-    ui,
-    modules,
+    auth: resolved.auth,
+    orm: resolved.orm,
+    storage: resolved.storage,
+    ui: resolved.ui,
+    modules: resolved.modules,
     layout,
-    roles,
+    roles: resolved.roles,
     packageManager,
     existingEnvVars: snapshot.envVars,
     tsConfigPaths,
     isMonorepo,
     projectName,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Main entry point — routes to the correct strategy
+// ---------------------------------------------------------------------------
+
+export async function analyzeProject(projectRoot: string): Promise<ProjectAnalysis> {
+  logger.section("Analyzing project")
+
+  logger.step(1, 3, "Reading project files...")
+  const snapshot = await buildProjectSnapshot(projectRoot)
+
+  const env = detectRunEnvironment()
+
+  if (env === "claude-code") {
+    logger.info("Running in Claude Code — using static analysis (no API key required)")
+    return analyzeWithStaticFallback(projectRoot, snapshot)
+  }
+
+  if (env === "standalone-with-key") {
+    logger.info(`Using Claude API (${MODEL}) for intelligent project analysis...`)
+    return analyzeWithClaude(projectRoot, snapshot)
+  }
+
+  // standalone-no-key: static analysis + interactive fallback for low-confidence dimensions
+  logger.warn("No ANTHROPIC_API_KEY found — using static analysis with interactive fallback")
+  logger.info("Tip: set ANTHROPIC_API_KEY for fully automatic analysis")
+  return analyzeWithStaticFallback(projectRoot, snapshot)
 }

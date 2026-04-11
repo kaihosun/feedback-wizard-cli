@@ -3,15 +3,15 @@
   "version": "0.1.0",
   "description": "Install a feedback/bug-reporting wizard in any Next.js project — zero human intervention",
   "type": "module",
-  "author": "Eduardo Flores <eduardo@mtymaxx.com>",
+  "author": "kaihosun (https://github.com/kaihosun)",
   "license": "MIT",
-  "homepage": "https://github.com/edflores/feedback-wizard-cli#readme",
+  "homepage": "https://github.com/kaihosun/feedback-wizard-cli#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/edflores/feedback-wizard-cli.git"
+    "url": "https://github.com/kaihosun/feedback-wizard-cli.git"
   },
   "bugs": {
-    "url": "https://github.com/edflores/feedback-wizard-cli/issues"
+    "url": "https://github.com/kaihosun/feedback-wizard-cli/issues"
   },
   "keywords": [
     "nextjs",
