@@ -3,6 +3,27 @@
   "version": "0.1.0",
   "description": "Install a feedback/bug-reporting wizard in any Next.js project — zero human intervention",
   "type": "module",
+  "author": "Eduardo Flores <eduardo@mtymaxx.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/edflores/feedback-wizard-cli#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/edflores/feedback-wizard-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/edflores/feedback-wizard-cli/issues"
+  },
+  "keywords": [
+    "nextjs",
+    "feedback",
+    "bug-reporting",
+    "wizard",
+    "cli",
+    "scaffolding",
+    "supabase",
+    "prisma",
+    "shadcn"
+  ],
   "bin": {
     "feedback-wizard": "./dist/bin/wizard.js"
   },
