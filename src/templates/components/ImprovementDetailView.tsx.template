@@ -1,0 +1,599 @@
+"use client"
+
+import { useEffect, useState, useTransition } from "react"
+import { format } from "date-fns"
+import { es } from "date-fns/locale"
+import {
+  ArrowLeft,
+  Trash2,
+  Loader2,
+  FileVideo,
+  FileText,
+  ImageIcon,
+  CheckCircle2,
+  Clock,
+  AlertCircle,
+} from "lucide-react"
+import { toast } from "sonner"
+import { Button } from "@/components/ui/button"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Textarea } from "@/components/ui/textarea"
+import { Separator } from "@/components/ui/separator"
+import { Skeleton } from "@/components/ui/skeleton"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { ImprovementStatusBadge } from "./ImprovementStatusBadge"
+import { ImprovementTypeBadge } from "./ImprovementTypeBadge"
+import { ImprovementPriorityBadge } from "./ImprovementPriorityBadge"
+import { useImprovementModal } from "./ImprovementModalProvider"
+import {
+  getImprovement,
+  addComment,
+  deleteComment,
+  updateImprovementStatus,
+} from "@/actions/improvements"
+import { IMPROVEMENT_STATUS_LABELS } from "@/types/improvements"
+import type {
+  ImprovementDetail,
+  ImprovementStatus,
+  ImprovementCommentRow,
+  ImprovementStatusHistoryRow,
+  ImprovementAttachmentRow,
+} from "@/types/improvements"
+{{AUTH_IMPORTS_BLOCK}}
+
+const ALL_STATUSES: ImprovementStatus[] = [
+  "created",
+  "in_progress",
+  "completed",
+  "cancelled",
+  "rejected",
+]
+
+export function ImprovementDetailView({ id }: { id: string }) {
+  const { goBack, closeModal } = useImprovementModal()
+  const [detail, setDetail] = useState<ImprovementDetail | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null)
+
+  // Comment state
+  const [commentText, setCommentText] = useState("")
+  const [isAddingComment, startAddingComment] = useTransition()
+  const [deletingCommentId, setDeletingCommentId] = useState<string | null>(null)
+
+  // Status change state
+  const [newStatus, setNewStatus] = useState<ImprovementStatus | "">("")
+  const [statusNotes, setStatusNotes] = useState("")
+  const [resolutionNotes, setResolutionNotes] = useState("")
+  const [fixedInVersion, setFixedInVersion] = useState("")
+  const [isChangingStatus, startChangingStatus] = useTransition()
+
+  // Attachment URLs
+  const [attachmentUrls, setAttachmentUrls] = useState<Record<string, string>>({})
+
+  useEffect(() => {
+    async function loadUser() {
+      {{AUTH_GET_CURRENT_USER_ID_BLOCK}}
+    }
+    loadUser()
+  }, [])
+
+  useEffect(() => {
+    async function load() {
+      setLoading(true)
+      setError(null)
+      try {
+        const result = await getImprovement(id)
+        if (!result) {
+          setError("Reporte no encontrado")
+        } else {
+          setDetail(result)
+          await resolveAttachmentUrls(result.attachments)
+        }
+      } catch {
+        setError("Error al cargar el reporte")
+      } finally {
+        setLoading(false)
+      }
+    }
+    load()
+  }, [id])
+
+  async function resolveAttachmentUrls(attachments: ImprovementAttachmentRow[]) {
+    const supabase = createClient()
+    const urls: Record<string, string> = {}
+    for (const att of attachments) {
+      const { data } = await supabase.storage
+        .from("{{STORAGE_BUCKET_NAME}}")
+        .createSignedUrl(att.storagePath, 3600)
+      if (data?.signedUrl) {
+        urls[att.id] = data.signedUrl
+      }
+    }
+    setAttachmentUrls(urls)
+  }
+
+  const handleAddComment = () => {
+    if (!commentText.trim()) return
+    startAddingComment(async () => {
+      const result = await addComment({ improvementId: id, content: commentText.trim() })
+      if (!result.success) {
+        toast.error(result.error)
+        return
+      }
+      setCommentText("")
+      setDetail((prev) => {
+        if (!prev) return prev
+        const newComment: ImprovementCommentRow = result.data
+        return {
+          ...prev,
+          comments: [...prev.comments, newComment],
+          _count: { ...prev._count, comments: prev._count.comments + 1 },
+        }
+      })
+      toast.success("Comentario agregado")
+    })
+  }
+
+  const handleDeleteComment = async (commentId: string) => {
+    setDeletingCommentId(commentId)
+    const result = await deleteComment(commentId)
+    setDeletingCommentId(null)
+    if (!result.success) {
+      toast.error(result.error)
+      return
+    }
+    setDetail((prev) => {
+      if (!prev) return prev
+      return {
+        ...prev,
+        comments: prev.comments.filter((c) => c.id !== commentId),
+        _count: { ...prev._count, comments: prev._count.comments - 1 },
+      }
+    })
+    toast.success("Comentario eliminado")
+  }
+
+  const handleChangeStatus = () => {
+    if (!newStatus) return
+    startChangingStatus(async () => {
+      const result = await updateImprovementStatus({
+        improvementId: id,
+        newStatus: newStatus as ImprovementStatus,
+        notes: statusNotes || undefined,
+        resolutionNotes: newStatus === "completed" ? resolutionNotes || undefined : undefined,
+        fixedInVersion: newStatus === "completed" ? fixedInVersion || undefined : undefined,
+      })
+      if (!result.success) {
+        toast.error(result.error)
+        return
+      }
+      toast.success("Estado actualizado")
+      const refreshed = await getImprovement(id)
+      if (refreshed) setDetail(refreshed)
+      setNewStatus("")
+      setStatusNotes("")
+      setResolutionNotes("")
+      setFixedInVersion("")
+    })
+  }
+
+  const isAdminOrResponsable =
+    detail?.viewerRole === "admin" || detail?.viewerRole === "responsable"
+
+  if (loading) {
+    return (
+      <div className="flex flex-col h-full px-6 py-4 space-y-4">
+        <Skeleton className="h-8 w-64" />
+        <Skeleton className="h-4 w-full" />
+        <Skeleton className="h-4 w-3/4" />
+        <Skeleton className="h-40 w-full" />
+      </div>
+    )
+  }
+
+  if (error || !detail) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-slate-400">
+        <AlertCircle size={40} className="mb-3 opacity-40" />
+        <p className="text-sm">{error ?? "Error desconocido"}</p>
+        <Button variant="ghost" size="sm" className="mt-2" onClick={goBack}>
+          Volver
+        </Button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="flex items-center gap-3 px-6 py-4 border-b border-slate-200 shrink-0">
+        <Button variant="ghost" size="sm" onClick={goBack} className="shrink-0">
+          <ArrowLeft size={16} className="mr-1" />
+          Volver
+        </Button>
+        <div className="flex items-center gap-2 flex-1 min-w-0 flex-wrap">
+          <span className="text-xs font-mono text-slate-400">#{detail.ticketNumber}</span>
+          <ImprovementTypeBadge type={detail.type} />
+          <ImprovementStatusBadge status={detail.status} />
+          <ImprovementPriorityBadge priority={detail.priority} />
+          {detail.module && (
+            <span className="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full border border-slate-200">
+              {detail.module}
+            </span>
+          )}
+        </div>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="shrink-0 text-slate-400 hover:text-slate-600"
+          onClick={closeModal}
+          aria-label="Cerrar modal"
+        >
+          ✕
+        </Button>
+      </div>
+
+      {/* Title */}
+      <div className="px-6 pt-4 pb-2 shrink-0">
+        <h2 className="text-xl font-semibold text-slate-900">{detail.title}</h2>
+      </div>
+
+      {/* Tabs */}
+      <div className="flex-1 overflow-hidden px-6 pb-4">
+        <Tabs defaultValue="details" className="flex flex-col h-full">
+          <TabsList className="bg-slate-100 shrink-0 self-start">
+            <TabsTrigger value="details">Detalles</TabsTrigger>
+            <TabsTrigger value="attachments">
+              Adjuntos ({detail._count.attachments})
+            </TabsTrigger>
+            <TabsTrigger value="comments">
+              Comentarios ({detail._count.comments})
+            </TabsTrigger>
+            <TabsTrigger value="history">Historial</TabsTrigger>
+          </TabsList>
+
+          <div className="flex-1 overflow-y-auto mt-4">
+            {/* Detalles */}
+            <TabsContent value="details" className="mt-0 space-y-4">
+              {detail.description ? (
+                <div>
+                  <p className="text-sm font-medium text-slate-700 mb-1">Descripción</p>
+                  <p className="text-sm text-slate-600 whitespace-pre-wrap leading-relaxed">
+                    {detail.description}
+                  </p>
+                </div>
+              ) : (
+                <p className="text-sm text-slate-400 italic">Sin descripción</p>
+              )}
+
+              {detail.status === "completed" && detail.resolutionNotes && (
+                <div className="rounded-lg bg-green-50 border border-green-200 px-4 py-3">
+                  <div className="flex items-center gap-2 mb-1">
+                    <CheckCircle2 size={16} className="text-green-600" />
+                    <span className="text-sm font-medium text-green-700">Corregido</span>
+                    {detail.fixedInVersion && (
+                      <span className="text-xs bg-green-100 text-green-600 px-2 py-0.5 rounded-full border border-green-200">
+                        v{detail.fixedInVersion}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-sm text-green-600">{detail.resolutionNotes}</p>
+                </div>
+              )}
+
+              <Separator />
+
+              <div className="grid grid-cols-2 gap-4 text-sm">
+                <div>
+                  <span className="text-slate-500">Enviado por</span>
+                  <p className="font-medium text-slate-900 mt-0.5">
+                    {detail.submittedBy.fullName}
+                  </p>
+                </div>
+                {detail.assignedTo && (
+                  <div>
+                    <span className="text-slate-500">Asignado a</span>
+                    <p className="font-medium text-slate-900 mt-0.5">
+                      {detail.assignedTo.fullName}
+                    </p>
+                  </div>
+                )}
+                <div>
+                  <span className="text-slate-500">Creado</span>
+                  <p className="font-medium text-slate-900 mt-0.5">
+                    {format(new Date(detail.createdAt), "d MMM yyyy HH:mm", { locale: es })}
+                  </p>
+                </div>
+                <div>
+                  <span className="text-slate-500">Actualizado</span>
+                  <p className="font-medium text-slate-900 mt-0.5">
+                    {format(new Date(detail.updatedAt), "d MMM yyyy HH:mm", { locale: es })}
+                  </p>
+                </div>
+                {detail.fixedBy && (
+                  <div>
+                    <span className="text-slate-500">Corregido por</span>
+                    <p className="font-medium text-slate-900 mt-0.5">
+                      {detail.fixedBy.fullName}
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {/* Panel de admin */}
+              {isAdminOrResponsable && (
+                <>
+                  <Separator />
+                  <div className="space-y-3">
+                    <p className="text-sm font-semibold text-slate-700">Cambiar Estado</p>
+                    <Select
+                      value={newStatus}
+                      onValueChange={(v) => setNewStatus(v as ImprovementStatus)}
+                    >
+                      <SelectTrigger className="w-full">
+                        <SelectValue placeholder="Seleccionar nuevo estado" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {ALL_STATUSES.filter((s) => s !== detail.status).map((s) => (
+                          <SelectItem key={s} value={s}>
+                            {IMPROVEMENT_STATUS_LABELS[s]}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Textarea
+                      placeholder="Notas sobre el cambio de estado (opcional)"
+                      value={statusNotes}
+                      onChange={(e) => setStatusNotes(e.target.value)}
+                      rows={2}
+                      className="text-sm resize-none"
+                    />
+                    {newStatus === "completed" && (
+                      <div className="space-y-2 rounded-lg bg-green-50 border border-green-200 p-3">
+                        <p className="text-xs font-medium text-green-700">
+                          Información de resolución
+                        </p>
+                        <Textarea
+                          placeholder="Notas de resolución"
+                          value={resolutionNotes}
+                          onChange={(e) => setResolutionNotes(e.target.value)}
+                          rows={2}
+                          className="text-sm resize-none"
+                        />
+                        <input
+                          type="text"
+                          placeholder="Versión (ej: 1.2.0)"
+                          value={fixedInVersion}
+                          onChange={(e) => setFixedInVersion(e.target.value)}
+                          className="w-full text-sm border border-input rounded-md px-3 py-2 bg-background focus:outline-none focus:ring-2 focus:ring-ring"
+                        />
+                      </div>
+                    )}
+                    <Button
+                      onClick={handleChangeStatus}
+                      disabled={!newStatus || isChangingStatus}
+                      size="sm"
+                      className="bg-indigo-600 hover:bg-indigo-700 text-white"
+                    >
+                      {isChangingStatus && <Loader2 size={14} className="mr-1 animate-spin" />}
+                      Cambiar Estado
+                    </Button>
+                  </div>
+                </>
+              )}
+            </TabsContent>
+
+            {/* Adjuntos */}
+            <TabsContent value="attachments" className="mt-0">
+              {detail.attachments.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-slate-400">
+                  <FileText size={36} className="mb-3 opacity-40" />
+                  <p className="text-sm">No hay adjuntos</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-3 gap-3">
+                  {detail.attachments.map((att) => (
+                    <AttachmentThumbnail
+                      key={att.id}
+                      attachment={att}
+                      url={attachmentUrls[att.id]}
+                    />
+                  ))}
+                </div>
+              )}
+            </TabsContent>
+
+            {/* Comentarios */}
+            <TabsContent value="comments" className="mt-0 space-y-4">
+              <div className="space-y-3">
+                {detail.comments.length === 0 ? (
+                  <p className="text-sm text-slate-400 italic">Sin comentarios aún</p>
+                ) : (
+                  detail.comments.map((comment) => (
+                    <CommentItem
+                      key={comment.id}
+                      comment={comment}
+                      currentUserId={currentUserId}
+                      isAdmin={detail.viewerRole === "admin"}
+                      deletingId={deletingCommentId}
+                      onDelete={handleDeleteComment}
+                    />
+                  ))
+                )}
+              </div>
+              <Separator />
+              <div className="space-y-2">
+                <Textarea
+                  placeholder="Escribe un comentario..."
+                  value={commentText}
+                  onChange={(e) => setCommentText(e.target.value)}
+                  rows={3}
+                  className="text-sm resize-none"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                      handleAddComment()
+                    }
+                  }}
+                />
+                <Button
+                  size="sm"
+                  onClick={handleAddComment}
+                  disabled={!commentText.trim() || isAddingComment}
+                  className="bg-indigo-600 hover:bg-indigo-700 text-white"
+                >
+                  {isAddingComment && <Loader2 size={14} className="mr-1 animate-spin" />}
+                  Enviar
+                </Button>
+              </div>
+            </TabsContent>
+
+            {/* Historial */}
+            <TabsContent value="history" className="mt-0">
+              {detail.statusHistory.length === 0 ? (
+                <p className="text-sm text-slate-400 italic">Sin historial</p>
+              ) : (
+                <div className="space-y-3">
+                  {detail.statusHistory.map((entry) => (
+                    <HistoryItem key={entry.id} entry={entry} />
+                  ))}
+                </div>
+              )}
+            </TabsContent>
+          </div>
+        </Tabs>
+      </div>
+    </div>
+  )
+}
+
+// ─── Sub-components ────────────────────────────────────────────────────────────
+
+function AttachmentThumbnail({
+  attachment,
+  url,
+}: {
+  attachment: ImprovementAttachmentRow
+  url?: string
+}) {
+  const isImage = attachment.mimeType.startsWith("image/")
+  const isVideo = attachment.mimeType.startsWith("video/")
+  const sizeKb = Math.round(attachment.fileSize / 1024)
+
+  return (
+    <a
+      href={url ?? "#"}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="block rounded-lg border border-slate-200 overflow-hidden hover:shadow-md transition-shadow bg-white"
+    >
+      <div className="aspect-video bg-slate-100 flex items-center justify-center">
+        {isImage && url ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={url}
+            alt={attachment.fileName}
+            className="w-full h-full object-cover"
+          />
+        ) : isVideo ? (
+          <FileVideo size={32} className="text-slate-400" />
+        ) : (
+          <FileText size={32} className="text-slate-400" />
+        )}
+      </div>
+      <div className="p-2">
+        <p className="text-xs font-medium text-slate-700 truncate">{attachment.fileName}</p>
+        <p className="text-xs text-slate-400">{sizeKb} KB</p>
+      </div>
+    </a>
+  )
+}
+
+function CommentItem({
+  comment,
+  currentUserId,
+  isAdmin,
+  deletingId,
+  onDelete,
+}: {
+  comment: ImprovementCommentRow
+  currentUserId: string | null
+  isAdmin: boolean
+  deletingId: string | null
+  onDelete: (id: string) => void
+}) {
+  const canDelete = isAdmin || comment.user.id === currentUserId
+  const isDeleting = deletingId === comment.id
+
+  return (
+    <div className="flex gap-3">
+      <div className="shrink-0 w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center text-xs font-semibold text-indigo-700">
+        {comment.user.fullName.charAt(0).toUpperCase()}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-semibold text-slate-900">
+            {comment.user.fullName}
+          </span>
+          <span className="text-xs text-slate-400">
+            {format(new Date(comment.createdAt), "d MMM yyyy HH:mm", { locale: es })}
+          </span>
+        </div>
+        <p className="text-sm text-slate-700 mt-0.5 whitespace-pre-wrap">{comment.content}</p>
+      </div>
+      {canDelete && (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="shrink-0 h-7 w-7 text-slate-300 hover:text-red-500"
+          onClick={() => onDelete(comment.id)}
+          disabled={isDeleting}
+          aria-label="Eliminar comentario"
+        >
+          {isDeleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+        </Button>
+      )}
+    </div>
+  )
+}
+
+function HistoryItem({ entry }: { entry: ImprovementStatusHistoryRow }) {
+  return (
+    <div className="flex gap-3">
+      <div className="flex flex-col items-center">
+        <div className="w-2 h-2 rounded-full bg-indigo-400 mt-1.5 shrink-0" />
+        <div className="w-px flex-1 bg-slate-200 mt-1" />
+      </div>
+      <div className="flex-1 pb-4">
+        <div className="flex items-center gap-2 flex-wrap">
+          {entry.oldStatus && (
+            <>
+              <ImprovementStatusBadge status={entry.oldStatus} />
+              <span className="text-xs text-slate-400">→</span>
+            </>
+          )}
+          <ImprovementStatusBadge status={entry.newStatus} />
+        </div>
+        <div className="flex items-center gap-2 mt-1">
+          <Clock size={12} className="text-slate-400" />
+          <span className="text-xs text-slate-500">
+            {format(new Date(entry.createdAt), "d MMM yyyy HH:mm", { locale: es })}
+          </span>
+          <span className="text-xs text-slate-500">—</span>
+          <span className="text-xs text-slate-600 font-medium">
+            {entry.changedBy.fullName}
+          </span>
+        </div>
+        {entry.notes && (
+          <p className="text-xs text-slate-500 mt-1 italic">{entry.notes}</p>
+        )}
+      </div>
+    </div>
+  )
+}

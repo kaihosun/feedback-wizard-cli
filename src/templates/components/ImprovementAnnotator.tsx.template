@@ -1,0 +1,324 @@
+"use client"
+
+import { useEffect, useRef, useState, useCallback } from "react"
+import { ArrowLeft, RotateCcw, Save, Eraser, Type, Minus, PenLine } from "lucide-react"
+import { Button } from "@/components/ui/button"
+import { useImprovementModal } from "./ImprovementModalProvider"
+
+type Tool = "pen" | "text" | "arrow" | "eraser"
+
+export function ImprovementAnnotator({ fileIndex }: { fileIndex: number }) {
+  const { wizardDraft, setWizardDraft, goBack } = useImprovementModal()
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [activeTool, setActiveTool] = useState<Tool>("pen")
+  const [color, setColor] = useState("#ef4444")
+  const [lineWidth, setLineWidth] = useState(3)
+  const [isDrawing, setIsDrawing] = useState(false)
+  const lastPos = useRef<{ x: number; y: number } | null>(null)
+  const imageRef = useRef<HTMLImageElement | null>(null)
+  const textInputRef = useRef<HTMLInputElement>(null)
+  const [textPos, setTextPos] = useState<{ x: number; y: number } | null>(null)
+  const [textValue, setTextValue] = useState("")
+
+  const wf = wizardDraft.files[fileIndex]
+
+  // Load image onto canvas
+  useEffect(() => {
+    if (!wf || !canvasRef.current) return
+    const canvas = canvasRef.current
+    const ctx = canvas.getContext("2d")
+    if (!ctx) return
+
+    let isCancelled = false
+    const img = new Image()
+    img.crossOrigin = "anonymous"
+    img.onload = () => {
+      if (isCancelled) return
+      imageRef.current = img
+      canvas.width = img.naturalWidth
+      canvas.height = img.naturalHeight
+      ctx.drawImage(img, 0, 0)
+    }
+    img.src = wf.preview
+
+    return () => {
+      isCancelled = true
+      img.onload = null
+    }
+  }, [wf])
+
+  const getCanvasPos = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>): { x: number; y: number } => {
+      const canvas = canvasRef.current!
+      const rect = canvas.getBoundingClientRect()
+      const scaleX = canvas.width / rect.width
+      const scaleY = canvas.height / rect.height
+      return {
+        x: (e.clientX - rect.left) * scaleX,
+        y: (e.clientY - rect.top) * scaleY,
+      }
+    },
+    []
+  )
+
+  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (activeTool === "text") {
+      const pos = getCanvasPos(e)
+      setTextPos(pos)
+      setTextValue("")
+      setTimeout(() => textInputRef.current?.focus(), 50)
+      return
+    }
+    setIsDrawing(true)
+    lastPos.current = getCanvasPos(e)
+  }
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!isDrawing) return
+    const canvas = canvasRef.current
+    const ctx = canvas?.getContext("2d")
+    if (!ctx || !lastPos.current) return
+
+    const pos = getCanvasPos(e)
+    ctx.beginPath()
+    ctx.strokeStyle = activeTool === "eraser" ? "rgba(0,0,0,0)" : color
+    ctx.lineWidth = activeTool === "eraser" ? lineWidth * 5 : lineWidth
+    ctx.lineCap = "round"
+    ctx.lineJoin = "round"
+
+    if (activeTool === "eraser") {
+      ctx.clearRect(pos.x - lineWidth * 2.5, pos.y - lineWidth * 2.5, lineWidth * 5, lineWidth * 5)
+    } else {
+      ctx.moveTo(lastPos.current.x, lastPos.current.y)
+      ctx.lineTo(pos.x, pos.y)
+      ctx.stroke()
+    }
+    lastPos.current = pos
+  }
+
+  const handleMouseUp = () => {
+    setIsDrawing(false)
+    lastPos.current = null
+  }
+
+  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (activeTool === "arrow") {
+      const canvas = canvasRef.current
+      const ctx = canvas?.getContext("2d")
+      if (!ctx) return
+      const pos = getCanvasPos(e)
+      drawArrow(ctx, pos.x - 40, pos.y - 20, pos.x, pos.y)
+    }
+  }
+
+  function drawArrow(
+    ctx: CanvasRenderingContext2D,
+    fromX: number,
+    fromY: number,
+    toX: number,
+    toY: number
+  ) {
+    const headLen = 16
+    const angle = Math.atan2(toY - fromY, toX - fromX)
+    ctx.beginPath()
+    ctx.strokeStyle = color
+    ctx.lineWidth = lineWidth
+    ctx.lineCap = "round"
+    ctx.moveTo(fromX, fromY)
+    ctx.lineTo(toX, toY)
+    ctx.stroke()
+    ctx.beginPath()
+    ctx.moveTo(toX, toY)
+    ctx.lineTo(
+      toX - headLen * Math.cos(angle - Math.PI / 6),
+      toY - headLen * Math.sin(angle - Math.PI / 6)
+    )
+    ctx.lineTo(
+      toX - headLen * Math.cos(angle + Math.PI / 6),
+      toY - headLen * Math.sin(angle + Math.PI / 6)
+    )
+    ctx.closePath()
+    ctx.fillStyle = color
+    ctx.fill()
+  }
+
+  function handleTextSubmit() {
+    if (!textPos || !textValue.trim()) {
+      setTextPos(null)
+      return
+    }
+    const canvas = canvasRef.current
+    const ctx = canvas?.getContext("2d")
+    if (!ctx) return
+    ctx.font = `${lineWidth * 6 + 10}px sans-serif`
+    ctx.fillStyle = color
+    ctx.fillText(textValue, textPos.x, textPos.y)
+    setTextPos(null)
+    setTextValue("")
+  }
+
+  function handleReset() {
+    const canvas = canvasRef.current
+    const ctx = canvas?.getContext("2d")
+    if (!ctx || !canvas || !imageRef.current) return
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    ctx.drawImage(imageRef.current, 0, 0)
+  }
+
+  function handleSave() {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const dataUrl = canvas.toDataURL("image/png")
+    setWizardDraft((prev) => {
+      const files = [...prev.files]
+      files[fileIndex] = {
+        ...files[fileIndex],
+        preview: dataUrl,
+        annotationData: { dataUrl },
+        annotated: true,
+      }
+      return { ...prev, files }
+    })
+    goBack()
+  }
+
+  if (!wf) {
+    return (
+      <div className="flex items-center justify-center h-full text-slate-400">
+        <p className="text-sm">Archivo no encontrado</p>
+      </div>
+    )
+  }
+
+  const tools: { id: Tool; icon: React.ReactNode; label: string }[] = [
+    { id: "pen", icon: <PenLine size={16} />, label: "Dibujar" },
+    { id: "text", icon: <Type size={16} />, label: "Texto" },
+    { id: "arrow", icon: <Minus size={16} className="rotate-[-45deg]" />, label: "Flecha" },
+    { id: "eraser", icon: <Eraser size={16} />, label: "Borrar" },
+  ]
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 shrink-0">
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" onClick={goBack}>
+            <ArrowLeft size={16} className="mr-1" />
+            Volver
+          </Button>
+          <span className="text-sm font-medium text-slate-700">
+            Anotando: {wf.file.name}
+          </span>
+        </div>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={handleReset}>
+            <RotateCcw size={14} className="mr-1" />
+            Reset
+          </Button>
+          <Button
+            size="sm"
+            className="bg-indigo-600 hover:bg-indigo-700 text-white"
+            onClick={handleSave}
+          >
+            <Save size={14} className="mr-1" />
+            Guardar Anotación
+          </Button>
+        </div>
+      </div>
+
+      {/* Toolbar */}
+      <div className="flex items-center gap-4 px-6 py-3 border-b border-slate-100 shrink-0 bg-slate-50 flex-wrap">
+        <div className="flex gap-1">
+          {tools.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => setActiveTool(t.id)}
+              title={t.label}
+              aria-label={t.label}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
+                activeTool === t.id
+                  ? "bg-indigo-600 text-white"
+                  : "bg-white border border-slate-200 text-slate-700 hover:bg-slate-100"
+              }`}
+            >
+              {t.icon}
+              <span className="hidden sm:inline">{t.label}</span>
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-slate-500" htmlFor="annotator-color">
+            Color
+          </label>
+          <input
+            id="annotator-color"
+            type="color"
+            value={color}
+            onChange={(e) => setColor(e.target.value)}
+            className="w-8 h-8 rounded cursor-pointer border border-slate-200"
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-slate-500" htmlFor="annotator-size">
+            Tamaño
+          </label>
+          <input
+            id="annotator-size"
+            type="range"
+            min={1}
+            max={10}
+            value={lineWidth}
+            onChange={(e) => setLineWidth(Number(e.target.value))}
+            className="w-24"
+          />
+          <span className="text-xs text-slate-500 w-4">{lineWidth}</span>
+        </div>
+      </div>
+
+      {/* Canvas */}
+      <div
+        ref={containerRef}
+        className="flex-1 overflow-auto bg-slate-800 flex items-start justify-center p-4"
+      >
+        <div className="relative">
+          <canvas
+            ref={canvasRef}
+            className="max-w-full rounded shadow-lg cursor-crosshair"
+            style={{ maxHeight: "calc(85vh - 200px)" }}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onMouseLeave={handleMouseUp}
+            onClick={handleCanvasClick}
+          />
+          {textPos && (
+            <div
+              className="absolute"
+              style={{
+                left: `${(textPos.x / (canvasRef.current?.width ?? 1)) * 100}%`,
+                top: `${(textPos.y / (canvasRef.current?.height ?? 1)) * 100}%`,
+              }}
+            >
+              <input
+                ref={textInputRef}
+                type="text"
+                value={textValue}
+                onChange={(e) => setTextValue(e.target.value)}
+                onBlur={handleTextSubmit}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleTextSubmit()
+                  if (e.key === "Escape") setTextPos(null)
+                }}
+                className="bg-transparent border-b-2 border-dashed text-white text-sm outline-none min-w-32"
+                style={{ color, fontSize: `${lineWidth * 6 + 10}px` }}
+                placeholder="Escribe aquí"
+              />
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}

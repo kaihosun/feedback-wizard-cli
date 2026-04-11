@@ -1,0 +1,125 @@
+"use client"
+
+import {
+  createContext,
+  useContext,
+  useState,
+  useCallback,
+  useRef,
+  type ReactNode,
+} from "react"
+import type { ModalView, WizardDraft } from "@/types/improvements"
+
+const DEFAULT_DRAFT: WizardDraft = {
+  type: null,
+  title: "",
+  description: "",
+  module: "",
+  priority: "medium",
+  files: [],
+}
+
+type ImprovementModalContextValue = {
+  isOpen: boolean
+  currentView: ModalView
+  viewHistory: ModalView[]
+  wizardDraft: WizardDraft
+  wizardStep: number
+  openModal: () => void
+  closeModal: () => void
+  navigateTo: (view: ModalView) => void
+  goBack: () => void
+  setWizardDraft: (draft: WizardDraft | ((prev: WizardDraft) => WizardDraft)) => void
+  setWizardStep: (step: number) => void
+  resetWizard: () => void
+}
+
+const ImprovementModalContext = createContext<ImprovementModalContextValue | null>(null)
+
+export function ImprovementModalProvider({ children }: { children: ReactNode }) {
+  const [isOpen, setIsOpen] = useState(false)
+  const [currentView, setCurrentView] = useState<ModalView>({ type: "list" })
+  const [viewHistory, setViewHistory] = useState<ModalView[]>([])
+  const [wizardDraft, setWizardDraftState] = useState<WizardDraft>(DEFAULT_DRAFT)
+  const [wizardStep, setWizardStep] = useState(1)
+
+  // Ref to always read the latest currentView without stale closure
+  const currentViewRef = useRef<ModalView>(currentView)
+  currentViewRef.current = currentView
+
+  const resetWizardState = useCallback(() => {
+    setWizardDraftState((prev) => {
+      prev.files.forEach((f) => URL.revokeObjectURL(f.preview))
+      return DEFAULT_DRAFT
+    })
+    setWizardStep(1)
+  }, [])
+
+  const openModal = useCallback(() => {
+    setCurrentView({ type: "list" })
+    setViewHistory([])
+    setIsOpen(true)
+  }, [])
+
+  const closeModal = useCallback(() => {
+    setIsOpen(false)
+    setTimeout(() => {
+      setCurrentView({ type: "list" })
+      setViewHistory([])
+      resetWizardState()
+    }, 300)
+  }, [resetWizardState])
+
+  const navigateTo = useCallback((view: ModalView) => {
+    setViewHistory((prev) => [...prev, currentViewRef.current])
+    setCurrentView(view)
+  }, [])
+
+  const goBack = useCallback(() => {
+    setViewHistory((prev) => {
+      if (prev.length === 0) return prev
+      const newHistory = [...prev]
+      const lastView = newHistory.pop()!
+      setCurrentView(lastView)
+      return newHistory
+    })
+  }, [])
+
+  const setWizardDraft = useCallback(
+    (draft: WizardDraft | ((prev: WizardDraft) => WizardDraft)) => {
+      setWizardDraftState(draft)
+    },
+    []
+  )
+
+  const resetWizard = resetWizardState
+
+  return (
+    <ImprovementModalContext.Provider
+      value={{
+        isOpen,
+        currentView,
+        viewHistory,
+        wizardDraft,
+        wizardStep,
+        openModal,
+        closeModal,
+        navigateTo,
+        goBack,
+        setWizardDraft,
+        setWizardStep,
+        resetWizard,
+      }}
+    >
+      {children}
+    </ImprovementModalContext.Provider>
+  )
+}
+
+export function useImprovementModal(): ImprovementModalContextValue {
+  const ctx = useContext(ImprovementModalContext)
+  if (!ctx) {
+    throw new Error("useImprovementModal must be used within ImprovementModalProvider")
+  }
+  return ctx
+}

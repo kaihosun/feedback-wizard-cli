@@ -1,0 +1,196 @@
+"use client"
+
+import { useEffect, useState } from "react"
+import { Bug, Sparkles, ListTodo, CheckCircle, Plus, Loader2 } from "lucide-react"
+import { Button } from "@/components/ui/button"
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Skeleton } from "@/components/ui/skeleton"
+import { ImprovementCard } from "./ImprovementCard"
+import { useImprovementModal } from "./ImprovementModalProvider"
+import { getImprovements } from "@/actions/improvements"
+import type {
+  ImprovementRow,
+  ImprovementStats,
+  GetImprovementsFilters,
+  ImprovementType,
+  ImprovementStatus,
+} from "@/types/improvements"
+
+type TabKey = "all" | "bug" | "feature" | "in_progress" | "completed"
+
+const TAB_FILTERS: Record<TabKey, GetImprovementsFilters> = {
+  all: {},
+  bug: { type: "bug" as ImprovementType },
+  feature: { type: "feature" as ImprovementType },
+  in_progress: { status: "in_progress" as ImprovementStatus },
+  completed: { status: "completed" as ImprovementStatus },
+}
+
+const EMPTY_STATS: ImprovementStats = {
+  totalBugs: 0,
+  completedBugs: 0,
+  totalFeatures: 0,
+  completedFeatures: 0,
+  inProgress: 0,
+  completed: 0,
+}
+
+export function ImprovementListView() {
+  const { navigateTo } = useImprovementModal()
+  const [activeTab, setActiveTab] = useState<TabKey>("all")
+  const [items, setItems] = useState<ImprovementRow[]>([])
+  const [stats, setStats] = useState<ImprovementStats>(EMPTY_STATS)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  const fetchData = async (tab: TabKey) => {
+    setLoading(true)
+    setError(null)
+    try {
+      const result = await getImprovements(TAB_FILTERS[tab])
+      setItems(result.items)
+      setStats(result.stats)
+    } catch {
+      setError("Error al cargar los datos")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    fetchData(activeTab)
+  }, [activeTab])
+
+  const handleTabChange = (value: string) => {
+    setActiveTab(value as TabKey)
+  }
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 shrink-0">
+        <div className="flex items-center gap-2">
+          <Bug size={20} className="text-indigo-600" />
+          <h2 className="text-lg font-semibold text-slate-900">Todas las Mejoras</h2>
+        </div>
+        <Button
+          size="sm"
+          className="bg-indigo-600 hover:bg-indigo-700 text-white"
+          onClick={() => navigateTo({ type: "new" })}
+        >
+          <Plus size={16} className="mr-1" />
+          Nueva Solicitud
+        </Button>
+      </div>
+
+      {/* Stats cards */}
+      <div className="grid grid-cols-4 gap-3 px-6 py-4 shrink-0">
+        <StatCard
+          icon={<Bug size={18} className="text-red-500" />}
+          label="Reportes de Error"
+          value={stats.totalBugs}
+          subtitle={`${stats.completedBugs} completado(s)`}
+          bgColor="bg-red-50"
+          borderColor="border-red-100"
+        />
+        <StatCard
+          icon={<Sparkles size={18} className="text-blue-500" />}
+          label="Solicitudes de Función"
+          value={stats.totalFeatures}
+          subtitle={`${stats.completedFeatures} completado(s)`}
+          bgColor="bg-blue-50"
+          borderColor="border-blue-100"
+        />
+        <StatCard
+          icon={<ListTodo size={18} className="text-blue-600" />}
+          label="En Progreso"
+          value={stats.inProgress}
+          bgColor="bg-blue-50"
+          borderColor="border-blue-100"
+        />
+        <StatCard
+          icon={<CheckCircle size={18} className="text-green-600" />}
+          label="Completados"
+          value={stats.completed}
+          bgColor="bg-green-50"
+          borderColor="border-green-100"
+        />
+      </div>
+
+      {/* Tabs */}
+      <div className="px-6 shrink-0">
+        <Tabs value={activeTab} onValueChange={handleTabChange}>
+          <TabsList className="bg-slate-100">
+            <TabsTrigger value="all">Todos</TabsTrigger>
+            <TabsTrigger value="bug">Reporte de Error</TabsTrigger>
+            <TabsTrigger value="feature">Solicitud de Función</TabsTrigger>
+            <TabsTrigger value="in_progress">En Progreso</TabsTrigger>
+            <TabsTrigger value="completed">Completados</TabsTrigger>
+          </TabsList>
+        </Tabs>
+      </div>
+
+      {/* List */}
+      <div className="flex-1 overflow-y-auto px-6 py-4">
+        {loading ? (
+          <div className="space-y-3">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <Skeleton key={i} className="h-24 w-full rounded-lg" />
+            ))}
+          </div>
+        ) : error ? (
+          <div className="flex flex-col items-center justify-center py-16 text-slate-400">
+            <Bug size={40} className="mb-3 opacity-40" />
+            <p className="text-sm">{error}</p>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="mt-2"
+              onClick={() => fetchData(activeTab)}
+            >
+              Reintentar
+            </Button>
+          </div>
+        ) : items.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-16 text-slate-400">
+            <CheckCircle size={40} className="mb-3 opacity-40" />
+            <p className="text-sm">No hay elementos para mostrar</p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {items.map((item) => (
+              <ImprovementCard key={item.id} improvement={item} />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function StatCard({
+  icon,
+  label,
+  value,
+  subtitle,
+  bgColor,
+  borderColor,
+}: {
+  icon: React.ReactNode
+  label: string
+  value: number
+  subtitle?: string
+  bgColor: string
+  borderColor: string
+}) {
+  return (
+    <div className={`rounded-lg border ${borderColor} ${bgColor} p-3`}>
+      <div className="flex items-center gap-2 mb-1">
+        {icon}
+        <span className="text-xs font-medium text-slate-600 truncate">{label}</span>
+      </div>
+      <p className="text-2xl font-bold text-slate-900">{value}</p>
+      {subtitle && <p className="text-xs text-slate-500 mt-0.5">{subtitle}</p>}
+    </div>
+  )
+}

@@ -1,0 +1,108 @@
+// feedback-wizard: improvements schema
+// Generated automatically. Do not edit manually.
+// Añade estos modelos a tu schema.prisma existente.
+
+enum {{TABLE_PREFIX}}ImprovementType {
+  bug
+  feature
+}
+
+enum {{TABLE_PREFIX}}ImprovementStatus {
+  created
+  in_progress
+  completed
+  cancelled
+  rejected
+}
+
+enum {{TABLE_PREFIX}}ImprovementPriority {
+  low
+  medium
+  high
+  critical
+}
+
+enum {{TABLE_PREFIX}}AttachmentType {
+  screenshot
+  video
+  document
+}
+
+model {{TABLE_PREFIX}}Improvement {
+  id              String                                  @id @default(cuid())
+  ticketNumber    Int                                     @unique @default(autoincrement())
+  type            {{TABLE_PREFIX}}ImprovementType
+  title           String
+  description     String?
+  status          {{TABLE_PREFIX}}ImprovementStatus      @default(created)
+  priority        {{TABLE_PREFIX}}ImprovementPriority    @default(medium)
+  module          String?
+  pageUrl         String?                                 @map("page_url")
+  resolutionNotes String?                                 @map("resolution_notes")
+  fixedInVersion  String?                                 @map("fixed_in_version")
+  resolvedAt      DateTime?                               @map("resolved_at")
+  deletedAt       DateTime?                               @map("deleted_at")
+  createdAt       DateTime                                @default(now()) @map("created_at")
+  updatedAt       DateTime                                @updatedAt @map("updated_at")
+
+  submittedById   String                                  @map("submitted_by_id")
+  submittedBy     {{USER_MODEL}}                          @relation("WizardSubmitted", fields: [submittedById], references: [{{USER_ID_FIELD}}])
+
+  assignedToId    String?                                 @map("assigned_to_id")
+  assignedTo      {{USER_MODEL}}?                         @relation("WizardAssigned", fields: [assignedToId], references: [{{USER_ID_FIELD}}])
+
+  fixedById       String?                                 @map("fixed_by_id")
+  fixedBy         {{USER_MODEL}}?                         @relation("WizardFixed", fields: [fixedById], references: [{{USER_ID_FIELD}}])
+
+  attachments     {{TABLE_PREFIX}}ImprovementAttachment[]
+  comments        {{TABLE_PREFIX}}ImprovementComment[]
+  statusHistory   {{TABLE_PREFIX}}ImprovementStatusHistory[]
+
+  @@index([status])
+  @@index([type])
+  @@index([submittedById])
+  @@map("{{DB_TABLE_PREFIX}}improvements")
+}
+
+model {{TABLE_PREFIX}}ImprovementAttachment {
+  id             String                          @id @default(cuid())
+  improvementId  String                          @map("improvement_id")
+  improvement    {{TABLE_PREFIX}}Improvement     @relation(fields: [improvementId], references: [id], onDelete: Cascade)
+  fileName       String                          @map("file_name")
+  fileSize       Int                             @map("file_size")
+  mimeType       String                          @map("mime_type")
+  storagePath    String                          @map("storage_path")
+  attachmentType {{TABLE_PREFIX}}AttachmentType  @map("attachment_type")
+  annotationData Json?                           @map("annotation_data")
+  createdAt      DateTime                        @default(now()) @map("created_at")
+
+  @@map("{{DB_TABLE_PREFIX}}improvement_attachments")
+}
+
+model {{TABLE_PREFIX}}ImprovementComment {
+  id             String                      @id @default(cuid())
+  improvementId  String                      @map("improvement_id")
+  improvement    {{TABLE_PREFIX}}Improvement @relation(fields: [improvementId], references: [id], onDelete: Cascade)
+  userId         String                      @map("user_id")
+  user           {{USER_MODEL}}              @relation("WizardComments", fields: [userId], references: [{{USER_ID_FIELD}}])
+  content        String
+  deletedAt      DateTime?                   @map("deleted_at")
+  createdAt      DateTime                    @default(now()) @map("created_at")
+  updatedAt      DateTime                    @updatedAt @map("updated_at")
+
+  @@map("{{DB_TABLE_PREFIX}}improvement_comments")
+}
+
+model {{TABLE_PREFIX}}ImprovementStatusHistory {
+  id             String                           @id @default(cuid())
+  improvementId  String                           @map("improvement_id")
+  improvement    {{TABLE_PREFIX}}Improvement      @relation(fields: [improvementId], references: [id], onDelete: Cascade)
+  changedById    String                           @map("changed_by_id")
+  changedBy      {{USER_MODEL}}                   @relation("WizardStatusHistory", fields: [changedById], references: [{{USER_ID_FIELD}}])
+  oldStatus      {{TABLE_PREFIX}}ImprovementStatus?
+  newStatus      {{TABLE_PREFIX}}ImprovementStatus
+  notes          String?
+  createdAt      DateTime                         @default(now()) @map("created_at")
+
+  @@map("{{DB_TABLE_PREFIX}}improvement_status_history")
+}

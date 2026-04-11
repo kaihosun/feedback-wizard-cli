@@ -1,0 +1,509 @@
+"use server"
+
+import { revalidatePath } from "next/cache"
+{{ORM_IMPORTS_BLOCK}}
+{{ORM_CLIENT_ENUMS_IMPORT}}
+{{AUTH_IMPORTS_BLOCK}}
+import { z } from "zod"
+import type {
+  ActionResult,
+  AddCommentInput,
+  AnnotationData,
+  CreateImprovementInput,
+  GetImprovementsFilters,
+  ImprovementAttachmentRow,
+  ImprovementCommentRow,
+  ImprovementDetail,
+  ImprovementRow,
+  ImprovementsListResult,
+  SaveAttachmentInput,
+  UpdateImprovementStatusInput,
+} from "@/types/improvements"
+import { ALLOWED_IMPROVEMENT_MIME_TYPES } from "@/types/improvements"
+
+// ─── Schemas Zod ──────────────────────────────────────────────────────────────
+
+const createImprovementSchema = z.object({
+  type: z.enum(["bug", "feature"]),
+  title: z.string().trim().min(3, "El título debe tener al menos 3 caracteres").max(200, "El título no puede superar 200 caracteres"),
+  description: z.string().trim().max(2000, "La descripción no puede superar 2000 caracteres").optional(),
+  module: z.string().trim().optional(),
+  priority: z.enum(["low", "medium", "high", "critical"]),
+})
+
+const addCommentSchema = z.object({
+  improvementId: z.string().min(1),
+  content: z.string().min(1, "El comentario no puede estar vacío").max(5000, "El comentario no puede superar 5000 caracteres"),
+})
+
+const updateImprovementStatusSchema = z.object({
+  improvementId: z.string().min(1),
+  newStatus: z.nativeEnum(ImprovementStatus),
+  notes: z.string().max(1000).optional(),
+  resolutionNotes: z.string().max(2000).optional(),
+  fixedInVersion: z.string().max(50).optional(),
+})
+
+const MAX_FILE_SIZE = 20 * 1024 * 1024 // 20 MB
+const saveAttachmentSchema = z
+  .object({
+    improvementId: z.string().min(1),
+    fileName: z.string().trim().min(1).max(255),
+    fileSize: z
+      .number()
+      .int()
+      .positive()
+      .max(MAX_FILE_SIZE, "El archivo no puede superar 20 MB"),
+    mimeType: z
+      .string()
+      .refine(
+        (v) => (ALLOWED_IMPROVEMENT_MIME_TYPES as readonly string[]).includes(v),
+        { message: "Tipo de archivo no permitido" }
+      ),
+    storagePath: z.string().min(1),
+    attachmentType: z.enum(["screenshot", "video", "document"]),
+    annotationData: z.object({ dataUrl: z.string() }).nullable().optional(),
+  })
+  .refine(
+    (data) => data.storagePath.startsWith(`{{STORAGE_BUCKET_NAME}}/${data.improvementId}/`),
+    { message: "Ruta de almacenamiento inválida", path: ["storagePath"] }
+  )
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+// Convierte JsonValue de Prisma a object | null de forma segura sin usar `any`
+function jsonToObject(value: unknown): object | null {
+  if (value === null || value === undefined) return null
+  if (typeof value === "object" && !Array.isArray(value)) return value as object
+  return null
+}
+
+// ─── getImprovements ──────────────────────────────────────────────────────────
+
+export async function getImprovements(
+  filters?: GetImprovementsFilters
+): Promise<ImprovementsListResult> {
+  const emptyStats = {
+    totalBugs: 0,
+    completedBugs: 0,
+    totalFeatures: 0,
+    completedFeatures: 0,
+    inProgress: 0,
+    completed: 0,
+  }
+
+  {{AUTH_GET_USER_BLOCK}}
+  if (!user) return { items: [], stats: emptyStats }
+
+  const where = {
+    deletedAt: null,
+    ...(filters?.type ? { type: filters.type } : {}),
+    ...(filters?.status ? { status: filters.status } : {}),
+  }
+
+  const [items, totalBugs, completedBugs, totalFeatures, completedFeatures, inProgress, completed] =
+    await Promise.all([
+      prisma.improvement.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          ticketNumber: true,
+          type: true,
+          title: true,
+          description: true,
+          status: true,
+          priority: true,
+          module: true,
+          resolutionNotes: true,
+          fixedInVersion: true,
+          resolvedAt: true,
+          createdAt: true,
+          updatedAt: true,
+          submittedBy: { select: { id: true, fullName: true } },
+          assignedTo: { select: { id: true, fullName: true } },
+          _count: {
+            select: {
+              comments: { where: { deletedAt: null } },
+              attachments: true,
+            },
+          },
+        },
+      }),
+      prisma.improvement.count({ where: { deletedAt: null, type: "bug" } }),
+      prisma.improvement.count({ where: { deletedAt: null, type: "bug", status: "completed" } }),
+      prisma.improvement.count({ where: { deletedAt: null, type: "feature" } }),
+      prisma.improvement.count({ where: { deletedAt: null, type: "feature", status: "completed" } }),
+      prisma.improvement.count({ where: { deletedAt: null, status: "in_progress" } }),
+      prisma.improvement.count({ where: { deletedAt: null, status: "completed" } }),
+    ])
+
+  return {
+    items,
+    stats: { totalBugs, completedBugs, totalFeatures, completedFeatures, inProgress, completed },
+  }
+}
+
+// ─── getImprovement ───────────────────────────────────────────────────────────
+
+export async function getImprovement(id: string): Promise<ImprovementDetail | null> {
+  {{AUTH_GET_USER_BLOCK}}
+  if (!user) return null
+
+  const dbViewer = await prisma.user.findUnique({
+    where: { id: user.id },
+    select: { role: true },
+  })
+
+  const raw = await prisma.improvement.findUnique({
+    where: { id, deletedAt: null },
+    select: {
+      id: true,
+      ticketNumber: true,
+      type: true,
+      title: true,
+      description: true,
+      status: true,
+      priority: true,
+      module: true,
+      resolutionNotes: true,
+      fixedInVersion: true,
+      resolvedAt: true,
+      createdAt: true,
+      updatedAt: true,
+      submittedBy: { select: { id: true, fullName: true } },
+      assignedTo: { select: { id: true, fullName: true } },
+      fixedBy: { select: { id: true, fullName: true } },
+      attachments: {
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          fileName: true,
+          fileSize: true,
+          mimeType: true,
+          storagePath: true,
+          attachmentType: true,
+          annotationData: true,
+          createdAt: true,
+        },
+      },
+      comments: {
+        where: { deletedAt: null },
+        orderBy: { createdAt: "asc" },
+        select: {
+          id: true,
+          content: true,
+          deletedAt: true,
+          createdAt: true,
+          updatedAt: true,
+          user: { select: { id: true, fullName: true } },
+        },
+      },
+      statusHistory: {
+        orderBy: { createdAt: "asc" },
+        select: {
+          id: true,
+          oldStatus: true,
+          newStatus: true,
+          notes: true,
+          createdAt: true,
+          changedBy: { select: { id: true, fullName: true } },
+        },
+      },
+      _count: {
+        select: {
+          comments: { where: { deletedAt: null } },
+          attachments: true,
+        },
+      },
+    },
+  })
+
+  if (!raw) return null
+
+  return {
+    ...raw,
+    viewerRole: dbViewer?.role ?? null,
+    attachments: raw.attachments.map((a) => ({
+      ...a,
+      annotationData: jsonToObject(a.annotationData) as AnnotationData | null,
+    })),
+  }
+}
+
+// ─── createImprovement ────────────────────────────────────────────────────────
+
+export async function createImprovement(
+  input: CreateImprovementInput
+): Promise<ActionResult<{ id: string }>> {
+  {{AUTH_GET_USER_BLOCK}}
+  if (!user) return { success: false, error: "No autenticado" }
+
+  const validated = createImprovementSchema.safeParse(input)
+  if (!validated.success) {
+    const firstError = Object.values(validated.error.flatten().fieldErrors).flat()[0]
+    return { success: false, error: firstError ?? "Datos inválidos" }
+  }
+
+  const data = validated.data
+
+  try {
+    const improvement = await prisma.$transaction(async (tx) => {
+      const imp = await tx.improvement.create({
+        data: {
+          type: data.type,
+          title: data.title,
+          description: data.description ?? null,
+          module: data.module ?? null,
+          priority: data.priority,
+          submittedById: user.id,
+          status: ImprovementStatus.created,
+        },
+      })
+
+      await tx.improvementStatusHistory.create({
+        data: {
+          improvementId: imp.id,
+          oldStatus: null,
+          newStatus: ImprovementStatus.created,
+          changedById: user.id,
+        },
+      })
+
+      return imp
+    })
+
+    revalidatePath("{{APP_DASHBOARD_PATH}}")
+    return { success: true, data: { id: improvement.id } }
+  } catch (e) {
+    console.error("Error creating improvement:", e)
+    return { success: false, error: "Error al crear el reporte" }
+  }
+}
+
+// ─── updateImprovementStatus ──────────────────────────────────────────────────
+
+export async function updateImprovementStatus(
+  input: UpdateImprovementStatusInput
+): Promise<ActionResult<void>> {
+  {{AUTH_GET_USER_BLOCK}}
+  if (!user) return { success: false, error: "No autenticado" }
+
+  const validated = updateImprovementStatusSchema.safeParse(input)
+  if (!validated.success) {
+    const firstError = Object.values(validated.error.flatten().fieldErrors).flat()[0]
+    return { success: false, error: firstError ?? "Datos inválidos" }
+  }
+
+  const dbUser = await prisma.user.findUnique({
+    where: { id: user.id },
+    select: { id: true, role: true },
+  })
+  if (!dbUser) return { success: false, error: "Usuario no encontrado en el sistema" }
+
+  if (dbUser.role === "{{ROLE_VIEWER_VALUE}}") {
+    return { success: false, error: "No tienes permiso para cambiar el estado" }
+  }
+
+  const validData = validated.data
+
+  const improvement = await prisma.improvement.findUnique({
+    where: { id: validData.improvementId, deletedAt: null },
+    select: { id: true, status: true },
+  })
+  if (!improvement) return { success: false, error: "Reporte no encontrado" }
+
+  const isCompleting = validData.newStatus === ImprovementStatus.completed
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      await tx.improvement.update({
+        where: { id: validData.improvementId },
+        data: {
+          status: validData.newStatus,
+          ...(isCompleting
+            ? {
+                resolvedAt: new Date(),
+                resolutionNotes: validData.resolutionNotes ?? null,
+                fixedInVersion: validData.fixedInVersion ?? null,
+                fixedById: dbUser.id,
+              }
+            : {}),
+        },
+      })
+
+      await tx.improvementStatusHistory.create({
+        data: {
+          improvementId: validData.improvementId,
+          oldStatus: improvement.status,
+          newStatus: validData.newStatus,
+          notes: validData.notes ?? null,
+          changedById: dbUser.id,
+        },
+      })
+    })
+
+    revalidatePath("{{APP_DASHBOARD_PATH}}")
+    return { success: true, data: undefined }
+  } catch (e) {
+    console.error("Error updating improvement status:", e)
+    return { success: false, error: "Error al cambiar el estado" }
+  }
+}
+
+// ─── addComment ───────────────────────────────────────────────────────────────
+
+export async function addComment(
+  input: AddCommentInput
+): Promise<ActionResult<ImprovementCommentRow>> {
+  {{AUTH_GET_USER_BLOCK}}
+  if (!user) return { success: false, error: "No autenticado" }
+
+  const validated = addCommentSchema.safeParse(input)
+  if (!validated.success) {
+    const firstError = Object.values(validated.error.flatten().fieldErrors).flat()[0]
+    return { success: false, error: firstError ?? "Datos inválidos" }
+  }
+
+  const improvement = await prisma.improvement.findUnique({
+    where: { id: input.improvementId, deletedAt: null },
+    select: { id: true },
+  })
+  if (!improvement) return { success: false, error: "Reporte no encontrado" }
+
+  try {
+    const comment = await prisma.improvementComment.create({
+      data: {
+        improvementId: validated.data.improvementId,
+        content: validated.data.content,
+        userId: user.id,
+      },
+      select: {
+        id: true,
+        content: true,
+        deletedAt: true,
+        createdAt: true,
+        updatedAt: true,
+        user: { select: { id: true, fullName: true } },
+      },
+    })
+
+    revalidatePath("{{APP_DASHBOARD_PATH}}")
+    return { success: true, data: comment }
+  } catch (e) {
+    console.error("Error adding comment:", e)
+    return { success: false, error: "Error al agregar el comentario" }
+  }
+}
+
+// ─── deleteComment ────────────────────────────────────────────────────────────
+
+export async function deleteComment(commentId: string): Promise<ActionResult<void>> {
+  {{AUTH_GET_USER_BLOCK}}
+  if (!user) return { success: false, error: "No autenticado" }
+
+  const comment = await prisma.improvementComment.findUnique({
+    where: { id: commentId },
+    select: { id: true, userId: true, deletedAt: true },
+  })
+  if (!comment) return { success: false, error: "Comentario no encontrado" }
+  if (comment.deletedAt !== null) return { success: false, error: "El comentario ya fue eliminado" }
+
+  const dbUser = await prisma.user.findUnique({
+    where: { id: user.id },
+    select: { id: true, role: true },
+  })
+  if (!dbUser) return { success: false, error: "Usuario no encontrado en el sistema" }
+
+  const isAuthor = comment.userId === dbUser.id
+  const isAdmin = dbUser.role === "{{ROLE_ADMIN_VALUE}}"
+
+  if (!isAuthor && !isAdmin) {
+    return { success: false, error: "Solo el autor o un admin puede eliminar este comentario" }
+  }
+
+  try {
+    await prisma.improvementComment.update({
+      where: { id: commentId },
+      data: { deletedAt: new Date() },
+    })
+
+    revalidatePath("{{APP_DASHBOARD_PATH}}")
+    return { success: true, data: undefined }
+  } catch (e) {
+    console.error("Error deleting comment:", e)
+    return { success: false, error: "Error al eliminar el comentario" }
+  }
+}
+
+// ─── saveAttachment ───────────────────────────────────────────────────────────
+
+export async function saveAttachment(
+  input: SaveAttachmentInput
+): Promise<ActionResult<ImprovementAttachmentRow>> {
+  {{AUTH_GET_USER_BLOCK}}
+  if (!user) return { success: false, error: "No autenticado" }
+
+  const validated = saveAttachmentSchema.safeParse(input)
+  if (!validated.success) {
+    const firstError = Object.values(validated.error.flatten().fieldErrors).flat()[0]
+      ?? validated.error.issues[0]?.message
+    return { success: false, error: firstError ?? "Datos inválidos" }
+  }
+
+  const validData = validated.data
+
+  const improvement = await prisma.improvement.findUnique({
+    where: { id: validData.improvementId, deletedAt: null },
+    select: { id: true },
+  })
+  if (!improvement) return { success: false, error: "Reporte no encontrado" }
+
+  try {
+    const attachment = await prisma.improvementAttachment.create({
+      data: {
+        improvementId: validData.improvementId,
+        fileName: validData.fileName,
+        fileSize: validData.fileSize,
+        mimeType: validData.mimeType,
+        storagePath: validData.storagePath,
+        attachmentType: validData.attachmentType,
+        annotationData: validData.annotationData ?? Prisma.JsonNull,
+      },
+      select: {
+        id: true,
+        fileName: true,
+        fileSize: true,
+        mimeType: true,
+        storagePath: true,
+        attachmentType: true,
+        annotationData: true,
+        createdAt: true,
+      },
+    })
+
+    revalidatePath("{{APP_DASHBOARD_PATH}}")
+    return {
+      success: true,
+      data: {
+        ...attachment,
+        annotationData: jsonToObject(attachment.annotationData) as AnnotationData | null,
+      },
+    }
+  } catch (e) {
+    console.error("Error saving attachment:", e)
+    return { success: false, error: "Error al guardar el adjunto" }
+  }
+}
+
+// ─── getUsers ─────────────────────────────────────────────────────────────────
+
+export async function getUsers(): Promise<{ id: string; fullName: string }[]> {
+  {{AUTH_GET_USER_BLOCK}}
+  if (!user) return []
+
+  return prisma.user.findMany({
+    select: { id: true, fullName: true },
+    orderBy: { fullName: "asc" },
+  })
+}

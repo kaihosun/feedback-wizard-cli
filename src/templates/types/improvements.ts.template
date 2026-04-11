@@ -1,0 +1,170 @@
+{{ORM_TYPE_IMPORTS_BLOCK}}
+
+export type { ImprovementType, ImprovementStatus, ImprovementPriority, AttachmentType }
+
+export type ModalView =
+  | { type: "list" }
+  | { type: "detail"; id: string }
+  | { type: "new" }
+  | { type: "annotate"; fileIndex: number }
+
+export type AnnotationData = { dataUrl: string }
+
+export type WizardFile = {
+  id: string
+  file: File
+  preview: string
+  annotationData: AnnotationData | null
+  annotated: boolean
+}
+
+export type WizardDraft = {
+  type: ImprovementType | null
+  title: string
+  description: string
+  module: string
+  priority: ImprovementPriority
+  files: WizardFile[]
+}
+
+export type ActionResult<T = void> =
+  | { success: true; data: T }
+  | { success: false; error: string }
+
+export type ImprovementUser = {
+  id: string
+  fullName: string
+}
+
+export type ImprovementAttachmentRow = {
+  id: string
+  fileName: string
+  fileSize: number
+  mimeType: string
+  storagePath: string
+  attachmentType: AttachmentType
+  annotationData: AnnotationData | null
+  createdAt: Date
+}
+
+export type ImprovementCommentRow = {
+  id: string
+  content: string
+  deletedAt: Date | null
+  createdAt: Date
+  updatedAt: Date
+  user: ImprovementUser
+}
+
+export type ImprovementStatusHistoryRow = {
+  id: string
+  oldStatus: ImprovementStatus | null
+  newStatus: ImprovementStatus
+  notes: string | null
+  createdAt: Date
+  changedBy: ImprovementUser
+}
+
+export type ImprovementRow = {
+  id: string
+  ticketNumber: number
+  type: ImprovementType
+  title: string
+  description: string | null
+  status: ImprovementStatus
+  priority: ImprovementPriority
+  module: string | null
+  resolutionNotes: string | null
+  fixedInVersion: string | null
+  resolvedAt: Date | null
+  createdAt: Date
+  updatedAt: Date
+  submittedBy: ImprovementUser
+  assignedTo: ImprovementUser | null
+  _count: { comments: number; attachments: number }
+}
+
+export type ImprovementDetail = ImprovementRow & {
+  viewerRole: string | null
+  fixedBy: ImprovementUser | null
+  attachments: ImprovementAttachmentRow[]
+  comments: ImprovementCommentRow[]
+  statusHistory: ImprovementStatusHistoryRow[]
+}
+
+export type ImprovementStats = {
+  totalBugs: number
+  completedBugs: number
+  totalFeatures: number
+  completedFeatures: number
+  inProgress: number
+  completed: number
+}
+
+export type ImprovementsListResult = {
+  items: ImprovementRow[]
+  stats: ImprovementStats
+}
+
+export type GetImprovementsFilters = {
+  type?: ImprovementType
+  status?: ImprovementStatus
+}
+
+export type CreateImprovementInput = {
+  type: ImprovementType
+  title: string
+  description?: string
+  module?: string
+  priority: ImprovementPriority
+}
+
+export type UpdateImprovementStatusInput = {
+  improvementId: string
+  newStatus: ImprovementStatus
+  notes?: string
+  resolutionNotes?: string
+  fixedInVersion?: string
+}
+
+export type AddCommentInput = {
+  improvementId: string
+  content: string
+}
+
+export type SaveAttachmentInput = {
+  improvementId: string
+  fileName: string
+  fileSize: number
+  mimeType: string
+  storagePath: string
+  attachmentType: AttachmentType
+  annotationData?: AnnotationData
+}
+
+export const IMPROVEMENT_MODULES = {{DETECTED_MODULES}} as const
+
+export const IMPROVEMENT_TYPE_LABELS: Record<ImprovementType, string> = {
+  bug: "Reporte de Error",
+  feature: "Solicitud de Función",
+}
+
+export const IMPROVEMENT_STATUS_LABELS: Record<ImprovementStatus, string> = {
+  created: "Creado",
+  in_progress: "En Progreso",
+  completed: "Completado",
+  cancelled: "Cancelado",
+  rejected: "Rechazado",
+}
+
+export const IMPROVEMENT_PRIORITY_LABELS: Record<ImprovementPriority, string> = {
+  low: "Baja",
+  medium: "Normal",
+  high: "Alta",
+  critical: "Crítico",
+}
+
+export const ALLOWED_IMPROVEMENT_MIME_TYPES = [
+  "image/png", "image/jpeg", "image/gif", "image/webp",
+  "video/mp4", "video/webm", "application/pdf",
+] as const

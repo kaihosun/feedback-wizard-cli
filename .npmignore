@@ -1,0 +1,9 @@
+tests/
+*.test.ts
+tsconfig.json
+tsup.config.ts
+.gitignore
+*.md
+!README.md
+scripts/
+.wizard-backup/

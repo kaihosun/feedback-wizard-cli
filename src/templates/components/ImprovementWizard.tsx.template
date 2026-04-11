@@ -1,0 +1,607 @@
+"use client"
+
+import { useEffect, useRef, useState, useTransition } from "react"
+import { Bug, Sparkles, X, Image as ImageIcon, Video, Loader2, CheckCircle2, PenLine } from "lucide-react"
+import { toast } from "sonner"
+import { Button } from "@/components/ui/button"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { Textarea } from "@/components/ui/textarea"
+import { cn } from "@/lib/utils"
+import { useImprovementModal } from "./ImprovementModalProvider"
+import { createImprovement, saveAttachment } from "@/actions/improvements"
+{{AUTH_IMPORTS_BLOCK}}
+import {
+  IMPROVEMENT_MODULES,
+  IMPROVEMENT_PRIORITY_LABELS,
+  IMPROVEMENT_TYPE_LABELS,
+} from "@/types/improvements"
+import type { AnnotationData, ImprovementType, ImprovementPriority, WizardFile } from "@/types/improvements"
+
+const SELECTABLE_PRIORITIES: { value: ImprovementPriority; label: string }[] = [
+  { value: "medium", label: IMPROVEMENT_PRIORITY_LABELS.medium },
+  { value: "high", label: IMPROVEMENT_PRIORITY_LABELS.high },
+  { value: "critical", label: IMPROVEMENT_PRIORITY_LABELS.critical },
+]
+
+export function ImprovementWizard() {
+  const { wizardDraft, setWizardDraft, navigateTo, resetWizard, closeModal, wizardStep: step, setWizardStep: setStep } =
+    useImprovementModal()
+  const [isPending, startTransition] = useTransition()
+
+  // Step 2 — field errors
+  const [titleError, setTitleError] = useState<string | null>(null)
+  const [descriptionError, setDescriptionError] = useState<string | null>(null)
+
+  const imageInputRef = useRef<HTMLInputElement>(null)
+  const videoInputRef = useRef<HTMLInputElement>(null)
+
+  // Step ref so paste handler can always read the current step without stale closure
+  const stepRef = useRef(step)
+  stepRef.current = step
+
+  // Paste listener for images — only active on step 3
+  useEffect(() => {
+    const handlePaste = (e: ClipboardEvent) => {
+      if (stepRef.current !== 3) return
+      const items = e.clipboardData?.items
+      if (!items) return
+      for (const item of Array.from(items)) {
+        if (item.type.startsWith("image/")) {
+          const file = item.getAsFile()
+          if (file) addFile(file)
+        }
+      }
+    }
+    window.addEventListener("paste", handlePaste)
+    return () => window.removeEventListener("paste", handlePaste)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  function addFile(file: File) {
+    const preview = URL.createObjectURL(file)
+    setWizardDraft((prev) => ({
+      ...prev,
+      files: [
+        ...prev.files,
+        { id: crypto.randomUUID(), file, preview, annotationData: null, annotated: false },
+      ],
+    }))
+  }
+
+  function removeFile(index: number) {
+    setWizardDraft((prev) => {
+      const files = [...prev.files]
+      URL.revokeObjectURL(files[index].preview)
+      files.splice(index, 1)
+      return { ...prev, files }
+    })
+  }
+
+  function handleFileInput(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? [])
+    files.forEach(addFile)
+    e.target.value = ""
+  }
+
+  function validateStep2(): boolean {
+    let valid = true
+    if (wizardDraft.title.trim().length < 3) {
+      setTitleError("El título debe tener al menos 3 caracteres")
+      valid = false
+    } else if (wizardDraft.title.trim().length > 200) {
+      setTitleError("El título no puede superar 200 caracteres")
+      valid = false
+    } else {
+      setTitleError(null)
+    }
+    if (wizardDraft.description.trim().length > 0 && wizardDraft.description.trim().length < 10) {
+      setDescriptionError("La descripción debe tener al menos 10 caracteres")
+      valid = false
+    } else if (wizardDraft.description.trim().length > 2000) {
+      setDescriptionError("La descripción no puede superar 2000 caracteres")
+      valid = false
+    } else {
+      setDescriptionError(null)
+    }
+    return valid
+  }
+
+  function goToNextStep() {
+    if (step === 1 && !wizardDraft.type) {
+      toast.error("Selecciona un tipo de solicitud")
+      return
+    }
+    if (step === 2 && !validateStep2()) return
+    setStep(step + 1)
+  }
+
+  function goToPrevStep() {
+    setStep(step - 1)
+  }
+
+  function handleSubmit() {
+    if (!wizardDraft.type) return
+    startTransition(async () => {
+      const result = await createImprovement({
+        type: wizardDraft.type as ImprovementType,
+        title: wizardDraft.title.trim(),
+        description: wizardDraft.description.trim() || undefined,
+        module: wizardDraft.module || undefined,
+        priority: wizardDraft.priority,
+      })
+
+      if (!result.success) {
+        toast.error(result.error)
+        return
+      }
+
+      const improvementId = result.data.id
+
+      // Upload files
+      if (wizardDraft.files.length > 0) {
+        {{STORAGE_UPLOAD_BLOCK}}
+      }
+
+      toast.success("Solicitud enviada correctamente")
+      resetWizard()
+      navigateTo({ type: "list" })
+    })
+  }
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 shrink-0">
+        <div>
+          <h2 className="text-lg font-semibold text-slate-900">Nueva Solicitud</h2>
+          <p className="text-xs text-slate-500 mt-0.5">Paso {step} de 4</p>
+        </div>
+        <Button variant="ghost" size="icon" onClick={closeModal} aria-label="Cancelar">
+          <X size={18} />
+        </Button>
+      </div>
+
+      {/* Step indicator */}
+      <div className="flex gap-1 px-6 pt-4 shrink-0">
+        {[1, 2, 3, 4].map((s) => (
+          <div
+            key={s}
+            className={cn(
+              "h-1.5 flex-1 rounded-full transition-colors",
+              s <= step ? "bg-indigo-500" : "bg-slate-200"
+            )}
+          />
+        ))}
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 overflow-y-auto px-6 py-6">
+        {step === 1 && <Step1 />}
+        {step === 2 && (
+          <Step2 titleError={titleError} descriptionError={descriptionError} />
+        )}
+        {step === 3 && (
+          <Step3
+            imageInputRef={imageInputRef}
+            videoInputRef={videoInputRef}
+            onFileInput={handleFileInput}
+            onRemoveFile={removeFile}
+          />
+        )}
+        {step === 4 && <Step4 />}
+      </div>
+
+      {/* Footer nav */}
+      <div className="flex items-center justify-between px-6 py-4 border-t border-slate-200 shrink-0">
+        <div className="flex gap-2">
+          {step > 1 && (
+            <Button variant="outline" size="sm" onClick={goToPrevStep}>
+              ← Atrás
+            </Button>
+          )}
+          <Button variant="ghost" size="sm" onClick={closeModal}>
+            Cancelar
+          </Button>
+        </div>
+        {step < 4 ? (
+          <Button
+            size="sm"
+            className="bg-indigo-600 hover:bg-indigo-700 text-white"
+            onClick={goToNextStep}
+          >
+            Siguiente →
+          </Button>
+        ) : (
+          <Button
+            size="sm"
+            className="bg-indigo-600 hover:bg-indigo-700 text-white"
+            onClick={handleSubmit}
+            disabled={isPending}
+          >
+            {isPending ? (
+              <Loader2 size={14} className="mr-1 animate-spin" />
+            ) : (
+              <CheckCircle2 size={14} className="mr-1" />
+            )}
+            Enviar
+          </Button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ─── Steps ─────────────────────────────────────────────────────────────────────
+
+function Step1() {
+  const { wizardDraft, setWizardDraft } = useImprovementModal()
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h3 className="text-base font-semibold text-slate-900 mb-1">
+          ¿Qué tipo de solicitud es?
+        </h3>
+        <p className="text-sm text-slate-500">Selecciona la categoría que mejor describe tu solicitud</p>
+      </div>
+      <div className="grid grid-cols-2 gap-4">
+        <button
+          type="button"
+          onClick={() => setWizardDraft((p) => ({ ...p, type: "bug" }))}
+          className={cn(
+            "rounded-xl border-2 p-5 text-left transition-all hover:shadow-md",
+            wizardDraft.type === "bug"
+              ? "border-red-500 bg-red-50"
+              : "border-slate-200 bg-white hover:border-red-200"
+          )}
+        >
+          <Bug size={28} className="text-red-500 mb-3" />
+          <p className="font-semibold text-slate-900">Reporte de Error</p>
+          <p className="text-sm text-slate-500 mt-1">Algo no funciona correctamente</p>
+        </button>
+        <button
+          type="button"
+          onClick={() => setWizardDraft((p) => ({ ...p, type: "feature" }))}
+          className={cn(
+            "rounded-xl border-2 p-5 text-left transition-all hover:shadow-md",
+            wizardDraft.type === "feature"
+              ? "border-blue-500 bg-blue-50"
+              : "border-slate-200 bg-white hover:border-blue-200"
+          )}
+        >
+          <Sparkles size={28} className="text-blue-500 mb-3" />
+          <p className="font-semibold text-slate-900">Solicitud de Función</p>
+          <p className="text-sm text-slate-500 mt-1">Quiero proponer una mejora</p>
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function Step2({
+  titleError,
+  descriptionError,
+}: {
+  titleError: string | null
+  descriptionError: string | null
+}) {
+  const { wizardDraft, setWizardDraft } = useImprovementModal()
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h3 className="text-base font-semibold text-slate-900 mb-1">Detalles</h3>
+        <p className="text-sm text-slate-500">Describe el problema o la función que solicitas</p>
+      </div>
+
+      {/* Title */}
+      <div className="space-y-1">
+        <label className="text-sm font-medium text-slate-700" htmlFor="wizard-title">
+          Título <span className="text-red-500">*</span>
+        </label>
+        <div className="relative">
+          <input
+            id="wizard-title"
+            type="text"
+            value={wizardDraft.title}
+            onChange={(e) =>
+              setWizardDraft((p) => ({ ...p, title: e.target.value }))
+            }
+            maxLength={200}
+            placeholder="Describe brevemente el problema o la mejora"
+            className={cn(
+              "w-full rounded-md border px-3 py-2 text-sm bg-background focus:outline-none focus:ring-2 focus:ring-ring",
+              titleError ? "border-red-400" : "border-input"
+            )}
+            aria-describedby={titleError ? "wizard-title-error" : undefined}
+          />
+          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">
+            {wizardDraft.title.length}/200
+          </span>
+        </div>
+        {titleError && (
+          <p id="wizard-title-error" className="text-xs text-red-600">
+            {titleError}
+          </p>
+        )}
+      </div>
+
+      {/* Description */}
+      <div className="space-y-1">
+        <label className="text-sm font-medium text-slate-700" htmlFor="wizard-description">
+          Descripción
+        </label>
+        <Textarea
+          id="wizard-description"
+          value={wizardDraft.description}
+          onChange={(e) =>
+            setWizardDraft((p) => ({ ...p, description: e.target.value }))
+          }
+          maxLength={2000}
+          placeholder="Describe con detalle el problema o la mejora que propones"
+          rows={4}
+          className={cn(
+            "resize-none",
+            descriptionError ? "border-red-400" : ""
+          )}
+          aria-describedby={descriptionError ? "wizard-desc-error" : undefined}
+        />
+        <div className="flex justify-between">
+          {descriptionError ? (
+            <p id="wizard-desc-error" className="text-xs text-red-600">
+              {descriptionError}
+            </p>
+          ) : (
+            <span />
+          )}
+          <span className="text-xs text-slate-400">
+            {wizardDraft.description.length}/2000
+          </span>
+        </div>
+      </div>
+
+      {/* Module */}
+      <div className="space-y-1">
+        <label className="text-sm font-medium text-slate-700">Módulo</label>
+        <Select
+          value={wizardDraft.module || ""}
+          onValueChange={(v) => setWizardDraft((p) => ({ ...p, module: v }))}
+        >
+          <SelectTrigger>
+            <SelectValue placeholder="Seleccionar módulo" />
+          </SelectTrigger>
+          <SelectContent>
+            {IMPROVEMENT_MODULES.map((m) => (
+              <SelectItem key={m} value={m}>
+                {m}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
+      {/* Priority */}
+      <div className="space-y-1">
+        <label className="text-sm font-medium text-slate-700">Prioridad</label>
+        <Select
+          value={wizardDraft.priority}
+          onValueChange={(v) =>
+            setWizardDraft((p) => ({ ...p, priority: v as ImprovementPriority }))
+          }
+        >
+          <SelectTrigger>
+            <SelectValue placeholder="Seleccionar prioridad" />
+          </SelectTrigger>
+          <SelectContent>
+            {SELECTABLE_PRIORITIES.map(({ value, label }) => (
+              <SelectItem key={value} value={value}>
+                {label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+    </div>
+  )
+}
+
+function Step3({
+  imageInputRef,
+  videoInputRef,
+  onFileInput,
+  onRemoveFile,
+}: {
+  imageInputRef: React.RefObject<HTMLInputElement>
+  videoInputRef: React.RefObject<HTMLInputElement>
+  onFileInput: (e: React.ChangeEvent<HTMLInputElement>) => void
+  onRemoveFile: (index: number) => void
+}) {
+  const { wizardDraft, navigateTo } = useImprovementModal()
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h3 className="text-base font-semibold text-slate-900 mb-1">Adjuntos</h3>
+        <p className="text-sm text-slate-500">
+          Sube capturas de pantalla o videos que ilustren el problema. También puedes pegar una imagen con Ctrl+V.
+        </p>
+      </div>
+
+      <div className="flex gap-3">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => imageInputRef.current?.click()}
+        >
+          <ImageIcon size={14} className="mr-1.5" />
+          Subir Imagen
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => videoInputRef.current?.click()}
+        >
+          <Video size={14} className="mr-1.5" />
+          Subir Video
+        </Button>
+        <input
+          ref={imageInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          className="hidden"
+          onChange={onFileInput}
+        />
+        <input
+          ref={videoInputRef}
+          type="file"
+          accept="video/mp4,video/webm"
+          multiple
+          className="hidden"
+          onChange={onFileInput}
+        />
+      </div>
+
+      {wizardDraft.files.length === 0 ? (
+        <div className="rounded-lg border-2 border-dashed border-slate-200 py-12 text-center">
+          <ImageIcon size={32} className="mx-auto mb-3 text-slate-300" />
+          <p className="text-sm text-slate-400">
+            Sin archivos adjuntos. Pega una imagen con Ctrl+V.
+          </p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-3 gap-3">
+          {wizardDraft.files.map((wf, i) => (
+            <FilePreviewCard
+              key={wf.id}
+              wf={wf}
+              index={i}
+              onRemove={onRemoveFile}
+              onAnnotate={() => navigateTo({ type: "annotate", fileIndex: i })}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function FilePreviewCard({
+  wf,
+  index,
+  onRemove,
+  onAnnotate,
+}: {
+  wf: WizardFile
+  index: number
+  onRemove: (i: number) => void
+  onAnnotate: () => void
+}) {
+  const isImage = wf.file.type.startsWith("image/")
+
+  return (
+    <div className="relative rounded-lg border border-slate-200 overflow-hidden bg-white group">
+      <div className="aspect-video bg-slate-100 flex items-center justify-center">
+        {isImage ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={wf.preview}
+            alt={wf.file.name}
+            className="w-full h-full object-cover"
+          />
+        ) : (
+          <Video size={32} className="text-slate-400" />
+        )}
+      </div>
+      <div className="p-2">
+        <p className="text-xs font-medium text-slate-700 truncate">{wf.file.name}</p>
+        <div className="flex items-center gap-1 mt-1 flex-wrap">
+          {wf.annotated && (
+            <span className="text-xs bg-green-100 text-green-700 px-1.5 py-0.5 rounded-full border border-green-200">
+              Anotado
+            </span>
+          )}
+          {isImage && (
+            <button
+              type="button"
+              onClick={onAnnotate}
+              className="text-xs text-indigo-600 hover:text-indigo-800 flex items-center gap-0.5"
+            >
+              <PenLine size={10} />
+              Anotar
+            </button>
+          )}
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={() => onRemove(index)}
+        className="absolute top-1 right-1 w-5 h-5 rounded-full bg-slate-800/60 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+        aria-label="Eliminar archivo"
+      >
+        <X size={12} />
+      </button>
+    </div>
+  )
+}
+
+function Step4() {
+  const { wizardDraft } = useImprovementModal()
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h3 className="text-base font-semibold text-slate-900 mb-1">Confirmar Envío</h3>
+        <p className="text-sm text-slate-500">Revisa los detalles antes de enviar</p>
+      </div>
+
+      <div className="rounded-xl border border-slate-200 bg-slate-50 p-5 space-y-4">
+        <div className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
+          <div>
+            <span className="text-slate-500 block mb-0.5">Tipo</span>
+            <span className="font-medium text-slate-900">
+              {wizardDraft.type
+                ? IMPROVEMENT_TYPE_LABELS[wizardDraft.type]
+                : "—"}
+            </span>
+          </div>
+          <div>
+            <span className="text-slate-500 block mb-0.5">Prioridad</span>
+            <span className="font-medium text-slate-900">
+              {IMPROVEMENT_PRIORITY_LABELS[wizardDraft.priority]}
+            </span>
+          </div>
+          {wizardDraft.module && (
+            <div>
+              <span className="text-slate-500 block mb-0.5">Módulo</span>
+              <span className="font-medium text-slate-900">{wizardDraft.module}</span>
+            </div>
+          )}
+          <div>
+            <span className="text-slate-500 block mb-0.5">Adjuntos</span>
+            <span className="font-medium text-slate-900">{wizardDraft.files.length}</span>
+          </div>
+        </div>
+
+        <div>
+          <span className="text-slate-500 text-sm block mb-0.5">Título</span>
+          <p className="font-semibold text-slate-900">{wizardDraft.title}</p>
+        </div>
+
+        {wizardDraft.description && (
+          <div>
+            <span className="text-slate-500 text-sm block mb-0.5">Descripción</span>
+            <p className="text-sm text-slate-700 line-clamp-4">{wizardDraft.description}</p>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
